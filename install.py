@@ -131,13 +131,15 @@ def _print_manual_cron(schedule: str):
 
 def _create_digest_cron(schedule: str) -> bool:
     cmd = HERMES_CMD or _find_hermes_cmd() or "hermes"
+    args = [cmd, "cron", "create", schedule,
+            "--name", DIGEST_CRON_NAME,
+            "--skill", "jira-bug-digest"]
+    deliver = os.environ.get("JIRA_DELIVER", "")
+    if deliver:
+        args += ["--deliver", deliver]
+    args += ["--prompt", DIGEST_CRON_PROMPT]
     try:
-        r = subprocess.run(
-            [cmd, "cron", "create", schedule,
-             "--name", DIGEST_CRON_NAME,
-             "--skill", "jira-bug-digest",
-             "--prompt", DIGEST_CRON_PROMPT],
-            capture_output=True, text=True, timeout=30)
+        r = subprocess.run(args, capture_output=True, text=True, timeout=30)
         if r.returncode == 0:
             _ok(f"已创建 cron job: {DIGEST_CRON_NAME} ({schedule})")
             return True

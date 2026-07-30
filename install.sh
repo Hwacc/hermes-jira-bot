@@ -130,14 +130,16 @@ _parse_digest_schedule() {
 
 _DIGEST_CRON_PROMPT='运行 jira_report.py 生成 HTML 日报'
 _DIGEST_CRON_NAME='jira-bug-daily-digest'
+_DIGEST_CRON_DELIVER="${JIRA_DELIVER:-}"
 
 _print_manual_cron() {
     local schedule="$1"
     echo "  ℹ️  可手动创建："
     echo ""
-    echo "     hermes cron create '${schedule}' \\"
-    echo "       --name ${_DIGEST_CRON_NAME} \\"
-    echo "       --skill jira-bug-digest \\"
+    echo "     hermes cron create '${schedule}' \\\\"
+    echo "       --name ${_DIGEST_CRON_NAME} \\\\"
+    echo "       --skill jira-bug-digest \\\\"
+    [ -n "${_DIGEST_CRON_DELIVER}" ] && echo "       --deliver ${_DIGEST_CRON_DELIVER} \\\\"
     echo "       --prompt '${_DIGEST_CRON_PROMPT}'"
     echo ""
     echo "  📄 Cron 模板参考: cron/jobs.template.json"
@@ -145,9 +147,12 @@ _print_manual_cron() {
 
 _create_digest_cron() {
     local schedule="$1"
+    local deliver_args=()
+    [ -n "${_DIGEST_CRON_DELIVER}" ] && deliver_args=("--deliver" "${_DIGEST_CRON_DELIVER}")
     if hermes cron create "$schedule" \
         --name "$_DIGEST_CRON_NAME" \
         --skill jira-bug-digest \
+        "${deliver_args[@]}" \
         --prompt "$_DIGEST_CRON_PROMPT" 2>/dev/null; then
         echo "  ✅ 已创建 cron job: ${_DIGEST_CRON_NAME} (${schedule})"
         return 0
