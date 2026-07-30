@@ -67,7 +67,7 @@ cp -r skills/jira-bug-digest ~/.hermes/skills/
 ⭐ 难度: ★★☆☆☆  ⏱ 预计: 2-4h
 🔍 根因: UI实现与设计稿不一致
 💡 建议: 对照设计稿逐项对比调整CSS
-❤ 来自 Chuancheng Hua 的 Hermes Jira Bot
+❤ 来自 Hwacc 的 Hermes Jira Bot
 ```
 
 ### Bug 日报
