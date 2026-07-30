@@ -10,12 +10,28 @@ Env vars:
   JIRA_USER_DISPLAY     — (optional) Display name in header; defaults to "User"
   CLOUDFLARE_ACCOUNT_ID — (optional) wrangler account ID
 """
-import json, os, sys, time, subprocess
+import json, os, sys, time, subprocess, base64, urllib.request
 from datetime import datetime
 
 NOW = datetime.now()
 SITE_URL = os.environ.get("JIRA_SITE_URL", "")
-USER_NAME = os.environ.get("JIRA_USER_DISPLAY", "User")
+
+def _fetch_display_name():
+    """Fetch display name from Jira /myself API."""
+    try:
+        email = os.environ["JIRA_USER_EMAIL"]
+        token = os.environ["JIRA_API_TOKEN"]
+        cid = os.environ["JIRA_CLOUD_ID"]
+        auth = base64.b64encode(f"{email}:{token}".encode()).decode()
+        req = urllib.request.Request(
+            f"https://api.atlassian.com/ex/jira/{cid}/rest/api/3/myself",
+            headers={"Authorization": f"Basic {auth}", "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read()).get("displayName", "User")
+    except Exception:
+        return os.environ.get("JIRA_USER_DISPLAY", "User")
+
+USER_NAME = _fetch_display_name()
 
 # Resolve jira_query.py relative to this file
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
