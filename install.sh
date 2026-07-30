@@ -14,10 +14,87 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-HERMES_ENV="$HERMES_HOME/.env"
 QUIET=false
 [[ "${1:-}" == "--quiet" ]] && QUIET=true
+
+# ============================================================
+# Platform helpers (Linux / macOS / WSL / Windows)
+# ============================================================
+
+_is_wsl() {
+    grep -qi microsoft /proc/version 2>/dev/null
+}
+
+# Windows 用户主目录的 WSL/MSYS 路径（勿硬编码用户名）
+_win_user_home() {
+    local win_home=""
+    if [ -n "${USERPROFILE:-}" ]; then
+        if command -v wslpath &>/dev/null; then
+            win_home=$(wslpath -u "$USERPROFILE" 2>/dev/null || true)
+        elif [[ "$USERPROFILE" == [A-Za-z]:* ]]; then
+            # Git Bash: C:\Users\foo -> /c/Users/foo
+            win_home="/${USERPROFILE:0:1}/${USERPROFILE:3}"
+            win_home="${win_home//\\//}"
+        fi
+    fi
+    if [ -z "$win_home" ] && _is_wsl; then
+        local d
+        for d in /mnt/c/Users/*; do
+            [ -d "$d/AppData/Local/hermes" ] && win_home="$d" && break
+        done
+    fi
+    [ -n "$win_home" ] && printf '%s\n' "$win_home"
+}
+
+# 解析 HERMES_HOME：显式环境变量 > 本机 ~/.hermes > Windows AppData\Local\hermes
+_resolve_hermes_home() {
+    if [ -n "${HERMES_HOME:-}" ]; then
+        printf '%s\n' "$HERMES_HOME"
+        return
+    fi
+    if [ -d "$HOME/.hermes" ]; then
+        printf '%s\n' "$HOME/.hermes"
+        return
+    fi
+    if [ -d "$HOME/AppData/Local/hermes" ]; then
+        printf '%s\n' "$HOME/AppData/Local/hermes"
+        return
+    fi
+    local win_home
+    win_home=$(_win_user_home || true)
+    if [ -n "$win_home" ] && [ -d "$win_home/AppData/Local/hermes" ]; then
+        printf '%s\n' "$win_home/AppData/Local/hermes"
+        return
+    fi
+    # 默认值（用于报错提示）；Linux 官方布局
+    printf '%s\n' "$HOME/.hermes"
+}
+
+HERMES_HOME="$(_resolve_hermes_home)"
+HERMES_ENV="$HERMES_HOME/.env"
+
+_load_jira_creds_from_env_file() {
+    # 仅填充尚未设置的变量，避免覆盖已有 export / quiet 模式凭证
+    [ -f "$HERMES_ENV" ] || return 0
+    local key val
+    while IFS='=' read -r key val || [ -n "$key" ]; do
+        [[ "$key" =~ ^(JIRA_USER_EMAIL|JIRA_API_TOKEN|JIRA_CLOUD_ID)$ ]] || continue
+        if [ -z "${!key:-}" ]; then
+            export "$key=$val"
+        fi
+    done < "$HERMES_ENV"
+}
+
+_find_python() {
+    local c
+    for c in python3 python python3.exe python.exe; do
+        if command -v "$c" &>/dev/null; then
+            printf '%s\n' "$c"
+            return 0
+        fi
+    done
+    return 1
+}
 
 # ============================================================
 # Banner
@@ -34,21 +111,60 @@ echo ""
 echo "━━━ Step 0: 检查前置条件 ━━━"
 
 # Check Hermes（多平台探测）
-_find_hermes() {
-    # WSL: Windows 侧路径
-    if grep -qi microsoft /proc/version 2>/dev/null; then
-        for p in "/mnt/c/Users/chuancheng.hua/AppData/Local/hermes/bin" \
-                 "/mnt/c/Users/chuancheng.hua/.hermes/bin"; do
-            [ -x "$p/hermes" ] && export PATH="$p:$PATH" && return 0
-        done
-    fi
-    # 标准路径
-    for p in "$HOME/AppData/Local/hermes/bin" "$HOME/.hermes/bin"; do
-        [ -x "$p/hermes" ] && export PATH="$p:$PATH" && return 0
-    done
-    command -v hermes &>/dev/null
+# Windows / WSL 上 CLI 通常是 hermes.exe（venv Scripts），不是无扩展名的 hermes。
+_hermes_wrap_exe() {
+    # 让后续脚本里的 `hermes ...` 在只有 hermes.exe 时也能用
+    hermes() { command hermes.exe "$@"; }
+    export -f hermes 2>/dev/null || true
 }
-HERMES_PRE_PATH="$PATH"
+
+_find_hermes() {
+    if command -v hermes &>/dev/null; then
+        return 0
+    fi
+    if command -v hermes.exe &>/dev/null; then
+        _hermes_wrap_exe
+        return 0
+    fi
+
+    # Linux / macOS 官方布局优先：~/.local/bin 符号链接、venv launcher、root FHS
+    local candidates=(
+        "$HOME/.local/bin/hermes"
+        "$HOME/.hermes/hermes-agent/venv/bin/hermes"
+        "/usr/local/bin/hermes"
+        "$HOME/.hermes/bin/hermes"
+        # Windows / Git Bash
+        "$HOME/AppData/Local/hermes/hermes-agent/venv/Scripts/hermes.exe"
+        "$HOME/AppData/Local/hermes/bin/hermes"
+        "$HOME/AppData/Local/hermes/bin/hermes.exe"
+        "$HOME/.hermes/bin/hermes.exe"
+    )
+
+    local win_home
+    win_home=$(_win_user_home || true)
+    if [ -n "$win_home" ]; then
+        candidates+=(
+            "$win_home/AppData/Local/hermes/hermes-agent/venv/Scripts/hermes.exe"
+            "$win_home/AppData/Local/hermes/bin/hermes"
+            "$win_home/AppData/Local/hermes/bin/hermes.exe"
+            "$win_home/.hermes/bin/hermes"
+            "$win_home/.hermes/bin/hermes.exe"
+        )
+    fi
+
+    local p
+    for p in "${candidates[@]}"; do
+        if [ -f "$p" ] || [ -L "$p" ]; then
+            export PATH="$(dirname "$p"):$PATH"
+            if [[ "$p" == *.exe ]] && ! command -v hermes &>/dev/null; then
+                _hermes_wrap_exe
+            fi
+            return 0
+        fi
+    done
+    return 1
+}
+
 if _find_hermes; then
     echo "  ✅ Hermes CLI 已安装: $(hermes --version 2>&1 | head -1)"
 else
@@ -57,9 +173,9 @@ else
     exit 1
 fi
 
-# Check Python
-if command -v python3 &>/dev/null || command -v python &>/dev/null; then
-    echo "  ✅ Python 可用"
+# Check Python（WSL 上可能只有 python.exe）
+if PY=$(_find_python); then
+    echo "  ✅ Python 可用 ($PY)"
 else
     echo "  ❌ Python 未找到"
     exit 1
@@ -80,6 +196,7 @@ echo ""
 echo "━━━ Step 1: 安装 Skills ━━━"
 
 SKILL_DIR="$HERMES_HOME/skills"
+mkdir -p "$SKILL_DIR"
 
 for skill in "$SCRIPT_DIR/skills/"*; do
     if [ -f "$skill/SKILL.md" ]; then
@@ -109,9 +226,14 @@ if [ "$QUIET" = true ]; then
         exit 1
     fi
 else
-    # Interactive mode
+    # Interactive mode：.env 已有，或 shell 环境变量已有，都算配置过
     for var in JIRA_USER_EMAIL JIRA_API_TOKEN JIRA_CLOUD_ID; do
         current=$(grep "^${var}=" "$HERMES_ENV" 2>/dev/null | cut -d= -f2- || echo "")
+        if [ -z "$current" ] && [ -n "${!var:-}" ]; then
+            current="${!var}"
+            # 持久化到 .env，方便后续 Hermes 进程读取
+            echo "${var}=${current}" >> "$HERMES_ENV"
+        fi
         if [ -n "$current" ]; then
             echo "  ✅ $var — 已配置"
         else
@@ -164,22 +286,14 @@ echo ""
 # ============================================================
 echo "━━━ Step 4: 验证 Jira API 连通性 ━━━"
 
+# 先从 .env 补齐凭证（交互安装只写入文件、未必 export）
+_load_jira_creds_from_env_file
+
 if [ -n "${JIRA_API_TOKEN:-}" ] && [ -n "${JIRA_CLOUD_ID:-}" ] && [ -n "${JIRA_USER_EMAIL:-}" ]; then
-    # Reload from .env for verification
-    source_env() {
-        while IFS='=' read -r key val; do
-            [[ "$key" =~ ^(JIRA_USER_EMAIL|JIRA_API_TOKEN|JIRA_CLOUD_ID)$ ]] && export "$key=$val"
-        done < "$HERMES_ENV"
-    }
-    source_env
-
-    if command -v python3 &>/dev/null; then
-        PY=python3
+    if ! PY=$(_find_python); then
+        echo "  ⏭️  跳过（未找到 Python）"
     else
-        PY=python
-    fi
-
-    VERIFY_OUT=$("$PY" -c "
+        VERIFY_OUT=$("$PY" -c "
 import os,json,base64,urllib.request
 email=os.environ.get('JIRA_USER_EMAIL','')
 token=os.environ.get('JIRA_API_TOKEN','')
@@ -191,10 +305,11 @@ with urllib.request.urlopen(req) as r:
 print(d.get('displayName','OK'))
 " 2>&1) || VERIFY_OUT="FAILED"
 
-    if [ "$VERIFY_OUT" = "FAILED" ]; then
-        echo "  ❌ Jira API 验证失败，请检查凭证是否正确"
-    else
-        echo "  ✅ Jira API 连通！已认证用户: $VERIFY_OUT"
+        if [ "$VERIFY_OUT" = "FAILED" ]; then
+            echo "  ❌ Jira API 验证失败，请检查凭证是否正确"
+        else
+            echo "  ✅ Jira API 连通！已认证用户: $VERIFY_OUT"
+        fi
     fi
 else
     echo "  ⏭️  跳过（凭证未完全配置）"

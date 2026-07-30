@@ -14,13 +14,44 @@
 import os, sys, json, shutil, base64, getpass, subprocess
 from pathlib import Path
 
+# Windows 控制台默认常是 GBK，避免打印 emoji/中文时 UnicodeEncodeError
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 SCRIPT_DIR = Path(__file__).resolve().parent
-HERMES_HOME = Path(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")))
-HERMES_ENV = HERMES_HOME / ".env"
-SKILLS_DST = HERMES_HOME / "skills"
 QUIET = "--quiet" in sys.argv
+HERMES_CMD = None
 
 CRED_VARS = ["JIRA_USER_EMAIL", "JIRA_API_TOKEN", "JIRA_CLOUD_ID"]
+
+def _resolve_hermes_home() -> Path:
+    """Resolve Hermes home across Linux ~/.hermes and Windows AppData\\Local\\hermes."""
+    if os.environ.get("HERMES_HOME"):
+        return Path(os.environ["HERMES_HOME"])
+    candidates = [
+        Path.home() / ".hermes",
+        Path.home() / "AppData" / "Local" / "hermes",
+    ]
+    # WSL: Windows install under /mnt/c/Users/<name>/AppData/Local/hermes
+    users = Path("/mnt/c/Users")
+    if users.is_dir():
+        for user_dir in users.iterdir():
+            win_home = user_dir / "AppData" / "Local" / "hermes"
+            if win_home.is_dir():
+                candidates.append(win_home)
+                break
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return Path.home() / ".hermes"
+
+HERMES_HOME = _resolve_hermes_home()
+HERMES_ENV = HERMES_HOME / ".env"
+SKILLS_DST = HERMES_HOME / "skills"
 
 # ── helpers ────────────────────────────────────────────
 
@@ -46,6 +77,30 @@ def _save_env(key, val):
     with open(HERMES_ENV, "a", encoding="utf-8") as f:
         f.write(f"{key}={val}\n")
 
+def _find_hermes_cmd():
+    """Resolve Hermes CLI across Linux/macOS/Windows layouts."""
+    for name in ("hermes", "hermes.exe"):
+        path = shutil.which(name)
+        if path:
+            return path
+    candidates = [
+        Path.home() / ".local" / "bin" / "hermes",
+        Path.home() / ".hermes" / "hermes-agent" / "venv" / "bin" / "hermes",
+        Path("/usr/local/bin/hermes"),
+        Path.home() / "AppData" / "Local" / "hermes" / "hermes-agent" / "venv" / "Scripts" / "hermes.exe",
+    ]
+    users = Path("/mnt/c/Users")
+    if users.is_dir():
+        for user_dir in users.iterdir():
+            candidates.append(
+                user_dir / "AppData" / "Local" / "hermes" / "hermes-agent" / "venv" / "Scripts" / "hermes.exe"
+            )
+            break
+    for c in candidates:
+        if c.is_file() or c.is_symlink():
+            return str(c)
+    return None
+
 # ── banner ─────────────────────────────────────────────
 
 def banner():
@@ -61,8 +116,13 @@ def step_0_check():
     print("━━━ Step 0: 检查前置条件 ━━━")
 
     # Hermes CLI
+    global HERMES_CMD
+    HERMES_CMD = _find_hermes_cmd()
+    if not HERMES_CMD:
+        _err("Hermes CLI 未找到，请先安装 Hermes Agent\n"
+              "     curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash")
     try:
-        r = subprocess.run(["hermes", "--version"], capture_output=True, text=True, timeout=10)
+        r = subprocess.run([HERMES_CMD, "--version"], capture_output=True, text=True, timeout=10)
         if r.returncode == 0:
             _ok(f"Hermes CLI 已安装: {r.stdout.strip().split(chr(10))[0]}")
         else:
@@ -144,7 +204,8 @@ def step_3_cron():
     print("━━━ Step 3: 创建 Cron Job ━━━")
 
     try:
-        r = subprocess.run(["hermes", "cron", "list"], capture_output=True, text=True, timeout=10)
+        cmd = HERMES_CMD or _find_hermes_cmd() or "hermes"
+        r = subprocess.run([cmd, "cron", "list"], capture_output=True, text=True, timeout=10)
         if "jira-bug-daily-digest" in (r.stdout + r.stderr):
             _skip("jira-bug-daily-digest cron job 已存在")
             print("")
