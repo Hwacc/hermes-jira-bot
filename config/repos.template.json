@@ -1,0 +1,9 @@
+{
+  "_comment": "Jira project key + fixVersion → git repo path mapping",
+  "_usage": "project.key + fixVersions[0].name → exact path → fallback default",
+  "CG": {
+    "name": "Cortex PC",
+    "versions": {},
+    "default": "C:/path/to/cortex-pc"
+  }
+}
