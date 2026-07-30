@@ -7,7 +7,7 @@
 
 | 功能 | 触发方式 | 说明 |
 |------|---------|------|
-| 📊 **Bug 日报** | Cron（早 9 / 晚 6） | 自动推送待办 Bug 汇总，使用 `jira-bug-digest` skill |
+| 📊 **Bug 日报** | Cron（早 9） | 自动推送待办 Bug 汇总，使用 `jira-bug-digest` skill |
 | 🔍 **Bug 分析** | `/jira-analyze CG-xxx` | LLM 分析难度/工时/根因，回帖到 Jira，使用 `jira-analyze` skill |
 | 🧪 **一键安装** | `bash install.sh` | 自动安装双 skill + 配置凭证 |
 
@@ -21,7 +21,7 @@
 ### 一键安装
 
 ```bash
-git clone https://github.com/chuancheng/hermes-jira-bot.git
+git clone git@github.com:Hwacc/hermes-jira-bot.git
 cd hermes-jira-bot
 bash install.sh
 ```
@@ -42,10 +42,11 @@ JIRA_API_TOKEN=your-jira-api-token
 JIRA_CLOUD_ID=your-cloud-instance-id
 ```
 
-然后复制 skill：
+然后复制 skills：
 
 ```bash
 cp -r skills/jira-analyze ~/.hermes/skills/
+cp -r skills/jira-bug-digest ~/.hermes/skills/
 ```
 
 ## 🚀 使用
@@ -66,16 +67,16 @@ cp -r skills/jira-analyze ~/.hermes/skills/
 ⭐ 难度: ★★☆☆☆  ⏱ 预计: 2-4h
 🔍 根因: UI实现与设计稿不一致
 💡 建议: 对照设计稿逐项对比调整CSS
-❤ 来自 YourName 的 Hermes Jira Bot
+❤ 来自 Chuancheng Hua 的 Hermes Jira Bot
 ```
 
 ### Bug 日报
 
-创建 cron job（每天 9:00 和 18:00 自动推送）：
+创建 cron job（每天 9:00 自动推送）：
 
 ```bash
-hermes cron create "0 9,18 * * *"                                         \
-  --skill jira-bug-digest                                                  \
+hermes cron create "0 9 * * *"                                             \
+  --skills jira-bug-digest                                                 \
   --prompt "运行 fetch_digest.py 生成并输出日报"
 ```
 
