@@ -8,7 +8,7 @@
 # 安装内容:
 #   1. 复制 skills (jira-analyze + jira-bug-digest) 到 ~/.hermes/skills/
 #   2. 交互式配置 Jira 凭证（JIRA_API_TOKEN / JIRA_USER_EMAIL / JIRA_CLOUD_ID）
-#   3. 创建推荐 cron job（早9晚6 Bug 日报，使用 jira-bug-digest）
+#   3. 创建推荐 cron job（早9 Bug 日报，使用 jira-bug-digest）
 #   4. 验证 Jira API 连通性
 
 set -eu
@@ -130,17 +130,15 @@ CRON_JOBS=$(hermes cron list 2>/dev/null || echo "")
 if echo "$CRON_JOBS" | grep -q "jira-bug-daily-digest"; then
     echo "  ⏭️  jira-bug-daily-digest cron job 已存在"
 else
-    echo "  创建 Bug 日报 cron job (每天 9:00 和 18:00)..."
-    # For cron creation we'd ideally use the hermes CLI or cronjob tool
-    # This is a manual step — provide instructions
+    echo "  创建 Bug 日报 cron job (每天 9:00)..."
     echo ""
     echo "  ℹ️  请手动创建 cron job："
     echo ""
-    echo "     hermes cron create '0 9,18 * * *' --skill jira-bug-digest \\"
-    echo "       --prompt '运行 fetch_digest.py 生成并输出日报'"
+    echo "     hermes cron create '0 9 * * *' --skills jira-bug-digest \\"
+    echo "       --prompt '运行 jira_report.py 生成 HTML 日报'"
     echo ""
     echo "     或在 Hermes 对话中输入："
-    echo "     「帮我创建一个 Jira Bug 日报 cron job，每天 9:00 和 18:00 执行」"
+    echo "     「帮我创建一个 Jira Bug 日报 cron job，每天 9:00 执行」"
     echo ""
     echo "  📄 Cron 模板参考: cron/jobs.template.json"
 fi
@@ -199,6 +197,6 @@ echo "  使用方法:"
 echo "    /jira-analyze CG-12345    分析指定 Bug"
 echo "    分析bug CG-12345           同上"
 echo ""
-echo "  Cron 日报创建后将在每天 9:00 和 18:00 自动推送。"
+echo "  Cron 日报创建后将在每天 9:00 自动推送。"
 echo "  详情参考: $SCRIPT_DIR/README.md"
 echo ""

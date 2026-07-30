@@ -1,8 +1,8 @@
 [
   {
     "name": "jira-bug-daily-digest",
-    "schedule": "0 9,18 * * *",
-    "skills": ["jira-analyze"],
-    "prompt": "你是 Jira 工作助手。每次运行执行以下任务：\n\n## 任务\n\n查询所有分配给当前用户、处于待办状态的 Bug。\n\n使用 Jira REST API 查询：\n```\nPOST https://api.atlassian.com/ex/jira/{JIRA_CLOUD_ID}/rest/api/3/search/jql\nAuthorization: Basic base64({JIRA_USER_EMAIL}:{JIRA_API_TOKEN})\nContent-Type: application/json\n\n{\n  \"jql\": \"issuetype = Bug AND assignee = currentUser() AND statusCategory = 'To Do' ORDER BY priority DESC, created DESC\",\n  \"maxResults\": 30,\n  \"fields\": [\"key\", \"summary\", \"priority\", \"created\", \"status\"]\n}\n```\n\n## 输出格式\n\n如果没有结果，只回复：\"✅ 没有待办 Bug\"\n\n如果有结果，格式如下：\n\n📊 Jira 待办 Bug · 当前时间\n━━━━━━━━━━━━━━\n🐛 总数 N · ⚠️ 高优 N\n\n⚠️ 高优先级\n  CG-5624 UI前端需要打印关键日志 (2019-12-29)\n\n其余\n  CG-20857 drag点击scan没起作用 (2026-07-20)\n  ...\n\n🔗 https://<your-site>.atlassian.net\n\n按优先级排序，高优先级别在最前面。每个 Bug 写 Key + 标题 + 创建日期。总数 > 10 个时其余部分只列 Key。\n\n只查询汇报，不做写操作。"
+    "schedule": "0 9 * * *",
+    "skills": ["jira-bug-digest"],
+    "prompt": "运行 jira_report.py 生成 HTML 日报\n\n脚本位置：{skillDir}/scripts/jira_report.py\n\n解析输出：\n- NO_BUGS → 回复 \"✅ 没有待办\"\n- PAGES_URL|<url>|<count> → 格式化日报 + 链接"
   }
 ]
