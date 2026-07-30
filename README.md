@@ -21,7 +21,7 @@
 ### 一键安装
 
 ```bash
-git clone git@github.com:Hwacc/hermes-jira-bot.git
+git clone https://github.com/Hwacc/hermes-jira-bot.git
 cd hermes-jira-bot
 bash install.sh
 ```
