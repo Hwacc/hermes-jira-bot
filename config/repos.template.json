@@ -1,9 +1,12 @@
 {
-  "_comment": "Jira project key + fixVersion → git repo path mapping",
-  "_usage": "project.key + fixVersions[0].name → exact path → fallback default",
+  "_comment": "Jira project.key + fixVersion → git repo + branch mapping",
+  "_usage": "project.key → fixVersions[0].name → version entry (path + branch) → fallback default",
   "CG": {
     "name": "Cortex PC",
-    "versions": {},
-    "default": "C:/path/to/cortex-pc"
+    "versions": {
+      "v10.0":   { "path": "C:/workspace/cortex-pc", "branch": "release/10.0" },
+      "V11.11":  { "path": "C:/workspace/cortex-pc", "branch": "release/11.11" }
+    },
+    "default": { "path": "C:/workspace/cortex-pc", "branch": "main" }
   }
 }
