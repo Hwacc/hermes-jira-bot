@@ -79,7 +79,7 @@ _load_creds_from_env_file() {
     [ -f "$HERMES_ENV" ] || return 0
     local key val
     while IFS='=' read -r key val || [ -n "$key" ]; do
-        [[ "$key" =~ ^(JIRA_USER_EMAIL|JIRA_API_TOKEN|JIRA_CLOUD_ID|CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID)$ ]] || continue
+        [[ "$key" =~ ^(JIRA_USER_EMAIL|JIRA_API_TOKEN|JIRA_CLOUD_ID|JIRA_DIGEST_CRON|JIRA_DELIVER|CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID)$ ]] || continue
         # 去掉 Windows .env 可能带的 \r
         val="${val%$'\r'}"
         if [ -z "${!key:-}" ]; then
@@ -130,16 +130,18 @@ _parse_digest_schedule() {
 
 _DIGEST_CRON_PROMPT='运行 jira_report.py 生成 HTML 日报'
 _DIGEST_CRON_NAME='jira-bug-daily-digest'
-_DIGEST_CRON_DELIVER="${JIRA_DELIVER:-}"
 
 _print_manual_cron() {
     local schedule="$1"
+    local deliver="${2:-${JIRA_DELIVER:-}}"
     echo "  ℹ️  可手动创建："
     echo ""
-    echo "     hermes cron create '${schedule}' \\\\"
-    echo "       --name ${_DIGEST_CRON_NAME} \\\\"
-    echo "       --skill jira-bug-digest \\\\"
-    [ -n "${_DIGEST_CRON_DELIVER}" ] && echo "       --deliver ${_DIGEST_CRON_DELIVER} \\\\"
+    echo "     hermes cron create '${schedule}' \\"
+    echo "       --name ${_DIGEST_CRON_NAME} \\"
+    echo "       --skill jira-bug-digest \\"
+    if [ -n "$deliver" ]; then
+        echo "       --deliver '${deliver}' \\"
+    fi
     echo "       --prompt '${_DIGEST_CRON_PROMPT}'"
     echo ""
     echo "  📄 Cron 模板参考: cron/jobs.template.json"
@@ -147,19 +149,59 @@ _print_manual_cron() {
 
 _create_digest_cron() {
     local schedule="$1"
-    local deliver_args=()
-    [ -n "${_DIGEST_CRON_DELIVER}" ] && deliver_args=("--deliver" "${_DIGEST_CRON_DELIVER}")
-    if hermes cron create "$schedule" \
-        --name "$_DIGEST_CRON_NAME" \
-        --skill jira-bug-digest \
-        "${deliver_args[@]}" \
-        --prompt "$_DIGEST_CRON_PROMPT" 2>/dev/null; then
-        echo "  ✅ 已创建 cron job: ${_DIGEST_CRON_NAME} (${schedule})"
+    local deliver="${2:-${JIRA_DELIVER:-}}"
+    local ok=0
+    if [ -n "$deliver" ]; then
+        if hermes cron create "$schedule" \
+            --name "$_DIGEST_CRON_NAME" \
+            --skill jira-bug-digest \
+            --deliver "$deliver" \
+            --prompt "$_DIGEST_CRON_PROMPT" 2>/dev/null; then
+            ok=1
+        fi
+    else
+        if hermes cron create "$schedule" \
+            --name "$_DIGEST_CRON_NAME" \
+            --skill jira-bug-digest \
+            --prompt "$_DIGEST_CRON_PROMPT" 2>/dev/null; then
+            ok=1
+        fi
+    fi
+    if [ "$ok" = "1" ]; then
+        if [ -n "$deliver" ]; then
+            echo "  ✅ 已创建 cron job: ${_DIGEST_CRON_NAME} (${schedule}, deliver=${deliver})"
+        else
+            echo "  ✅ 已创建 cron job: ${_DIGEST_CRON_NAME} (${schedule})"
+        fi
         return 0
     fi
     echo "  ⚠️  自动创建失败，请手动执行："
-    _print_manual_cron "$schedule"
+    _print_manual_cron "$schedule" "$deliver"
     return 1
+}
+
+_resolve_digest_deliver() {
+    # quiet: 用环境变量 / .env；interactive: 可覆盖，回车保留已有或默认 origin
+    local current="${JIRA_DELIVER:-}"
+    if [ "$QUIET" = true ]; then
+        printf '%s\n' "$current"
+        return 0
+    fi
+    local hint="origin"
+    [ -n "$current" ] && hint="$current"
+    echo "  投递目标（可选）: origin / local / telegram / discord / signal / platform:chat_id"
+    read -r -p "  日报投递目标 [${hint}]: " raw_deliver
+    raw_deliver="$(printf '%s' "$raw_deliver" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [ -z "$raw_deliver" ]; then
+        printf '%s\n' "$current"
+    else
+        # 显式 origin 等同默认（不传 --deliver）
+        if [ "$raw_deliver" = "origin" ]; then
+            printf '%s\n' ""
+        else
+            printf '%s\n' "$raw_deliver"
+        fi
+    fi
 }
 
 # ============================================================
@@ -329,19 +371,25 @@ echo ""
 # ============================================================
 echo "━━━ Step 3: 创建 Cron Job ━━━"
 
+# 调度 / 投递可能写在 .env，需在创建前加载
+_load_creds_from_env_file
+
 CRON_JOBS=$(hermes cron list 2>/dev/null || echo "")
 if echo "$CRON_JOBS" | grep -q "jira-bug-daily-digest"; then
     echo "  ⏭️  jira-bug-daily-digest cron job 已存在"
 else
     SCHEDULE=""
+    DELIVER=""
     if [ "$QUIET" = true ]; then
         if ! SCHEDULE=$(_parse_digest_schedule "${JIRA_DIGEST_CRON:-}"); then
             echo "  ❌ JIRA_DIGEST_CRON 无效: ${JIRA_DIGEST_CRON}"
             echo "     请使用 '9:00' 或标准 cron（如 '0 9 * * *'）"
             exit 1
         fi
+        DELIVER=$(_resolve_digest_deliver)
         echo "  使用调度: $SCHEDULE"
-        _create_digest_cron "$SCHEDULE" || true
+        [ -n "$DELIVER" ] && echo "  投递目标: $DELIVER"
+        _create_digest_cron "$SCHEDULE" "$DELIVER" || true
     else
         echo "  配置 Bug 日报 cron job（默认每天 09:00）"
         echo "  可输入友好时间（如 9:00 / 09:30）或 cron（如 0 9 * * *）"
@@ -352,8 +400,14 @@ else
             fi
             echo "  ⚠️  格式无效，请重试（例: 9:00 或 0 9 * * *）"
         done
+        DELIVER=$(_resolve_digest_deliver)
         echo "  使用调度: $SCHEDULE"
-        _create_digest_cron "$SCHEDULE" || true
+        if [ -n "$DELIVER" ]; then
+            echo "  投递目标: $DELIVER"
+        else
+            echo "  投递目标: origin（默认）"
+        fi
+        _create_digest_cron "$SCHEDULE" "$DELIVER" || true
     fi
 fi
 echo ""
@@ -363,7 +417,7 @@ echo ""
 # ============================================================
 echo "━━━ Step 3.5: Cloudflare Pages（HTML 日报） ━━━"
 
-# 先从 .env 补齐（含 Jira / Cloudflare），后续 Step 4 复用
+# 凭证已在 Step 3 加载过；此处再调一次无副作用（不覆盖已有 export）
 _load_creds_from_env_file
 
 if [ -n "${CLOUDFLARE_API_TOKEN:-}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then

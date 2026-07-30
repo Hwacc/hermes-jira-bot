@@ -119,35 +119,57 @@ def parse_digest_schedule(raw):
         return text
     raise ValueError(f"invalid schedule: {raw!r}")
 
-def _print_manual_cron(schedule: str):
+def _print_manual_cron(schedule, deliver=""):
+    deliver = deliver or os.environ.get("JIRA_DELIVER", "")
     print("  ℹ️  可手动创建：")
     print("")
     print(f"     hermes cron create '{schedule}' \\")
     print(f"       --name {DIGEST_CRON_NAME} \\")
     print("       --skill jira-bug-digest \\")
+    if deliver:
+        print(f"       --deliver '{deliver}' \\")
     print(f"       --prompt '{DIGEST_CRON_PROMPT}'")
     print("")
     print("  📄 Cron 模板参考: cron/jobs.template.json")
 
-def _create_digest_cron(schedule: str) -> bool:
+def _create_digest_cron(schedule, deliver=None) -> bool:
     cmd = HERMES_CMD or _find_hermes_cmd() or "hermes"
+    if deliver is None:
+        deliver = os.environ.get("JIRA_DELIVER", "")
     args = [cmd, "cron", "create", schedule,
             "--name", DIGEST_CRON_NAME,
             "--skill", "jira-bug-digest"]
-    deliver = os.environ.get("JIRA_DELIVER", "")
     if deliver:
         args += ["--deliver", deliver]
     args += ["--prompt", DIGEST_CRON_PROMPT]
     try:
         r = subprocess.run(args, capture_output=True, text=True, timeout=30)
         if r.returncode == 0:
-            _ok(f"已创建 cron job: {DIGEST_CRON_NAME} ({schedule})")
+            if deliver:
+                _ok(f"已创建 cron job: {DIGEST_CRON_NAME} ({schedule}, deliver={deliver})")
+            else:
+                _ok(f"已创建 cron job: {DIGEST_CRON_NAME} ({schedule})")
             return True
     except Exception:
         pass
     _warn("自动创建失败，请手动执行：")
-    _print_manual_cron(schedule)
+    _print_manual_cron(schedule, deliver)
     return False
+
+def _resolve_digest_deliver():
+    """Quiet: env/.env value. Interactive: optional override; empty keeps current; 'origin' clears."""
+    creds = _load_env()
+    current = os.environ.get("JIRA_DELIVER") or creds.get("JIRA_DELIVER", "")
+    if QUIET:
+        return current
+    hint = current or "origin"
+    print("  投递目标（可选）: origin / local / telegram / discord / signal / platform:chat_id")
+    raw = input(f"  日报投递目标 [{hint}]: ").strip()
+    if not raw:
+        return current
+    if raw == "origin":
+        return ""
+    return raw
 
 # ── banner ─────────────────────────────────────────────
 
@@ -251,6 +273,11 @@ def step_2_credentials():
 def step_3_cron():
     print("━━━ Step 3: 创建 Cron Job ━━━")
 
+    # 从 .env 补齐 JIRA_DIGEST_CRON / JIRA_DELIVER（不覆盖已有 export）
+    for key, val in _load_env().items():
+        if key in ("JIRA_DIGEST_CRON", "JIRA_DELIVER") and not os.environ.get(key):
+            os.environ[key] = val
+
     cmd = HERMES_CMD or _find_hermes_cmd() or "hermes"
     try:
         r = subprocess.run([cmd, "cron", "list"], capture_output=True, text=True, timeout=10)
@@ -266,8 +293,11 @@ def step_3_cron():
             schedule = parse_digest_schedule(os.environ.get("JIRA_DIGEST_CRON"))
         except ValueError:
             _err("JIRA_DIGEST_CRON 无效，请使用 '9:00' 或标准 cron（如 '0 9 * * *'）")
+        deliver = _resolve_digest_deliver()
         print(f"  使用调度: {schedule}")
-        _create_digest_cron(schedule)
+        if deliver:
+            print(f"  投递目标: {deliver}")
+        _create_digest_cron(schedule, deliver)
         print("")
         return
 
@@ -280,8 +310,10 @@ def step_3_cron():
             break
         except ValueError:
             print("  ⚠️  格式无效，请重试（例: 9:00 或 0 9 * * *）")
+    deliver = _resolve_digest_deliver()
     print(f"  使用调度: {schedule}")
-    _create_digest_cron(schedule)
+    print(f"  投递目标: {deliver or 'origin（默认）'}")
+    _create_digest_cron(schedule, deliver)
     print("")
 
 # ── Step 3.5: Cloudflare Pages（可选）───────────────────
