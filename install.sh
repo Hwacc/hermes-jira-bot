@@ -33,8 +33,23 @@ echo ""
 # ============================================================
 echo "━━━ Step 0: 检查前置条件 ━━━"
 
-# Check Hermes
-if command -v hermes &>/dev/null; then
+# Check Hermes（多平台探测）
+_find_hermes() {
+    # WSL: Windows 侧路径
+    if grep -qi microsoft /proc/version 2>/dev/null; then
+        for p in "/mnt/c/Users/chuancheng.hua/AppData/Local/hermes/bin" \
+                 "/mnt/c/Users/chuancheng.hua/.hermes/bin"; do
+            [ -x "$p/hermes" ] && export PATH="$p:$PATH" && return 0
+        done
+    fi
+    # 标准路径
+    for p in "$HOME/AppData/Local/hermes/bin" "$HOME/.hermes/bin"; do
+        [ -x "$p/hermes" ] && export PATH="$p:$PATH" && return 0
+    done
+    command -v hermes &>/dev/null
+}
+HERMES_PRE_PATH="$PATH"
+if _find_hermes; then
     echo "  ✅ Hermes CLI 已安装: $(hermes --version 2>&1 | head -1)"
 else
     echo "  ❌ Hermes CLI 未找到，请先安装 Hermes Agent"
