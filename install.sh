@@ -130,9 +130,9 @@ CRON_JOBS=$(hermes cron list 2>/dev/null || echo "")
 if echo "$CRON_JOBS" | grep -q "jira-bug-daily-digest"; then
     echo "  ⏭️  jira-bug-daily-digest cron job 已存在"
 else
-    echo "  创建 Bug 日报 cron job (每天 9:00)..."
+    echo "  配置 Bug 日报 cron job (推荐)..."
     echo ""
-    echo "  ℹ️  请手动创建 cron job："
+    echo "  ℹ️  Cron job 需手动创建："
     echo ""
     echo "     hermes cron create '0 9 * * *' --skills jira-bug-digest \\"
     echo "       --prompt '运行 jira_report.py 生成 HTML 日报'"
