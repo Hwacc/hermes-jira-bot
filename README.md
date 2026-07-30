@@ -137,7 +137,6 @@ hermes-jira-bot/
 - [x] 一键安装脚本
 - [ ] 桌面 TodoList 小组件
 - [ ] Claude Code / Copilot CLI 联动（AI 自动修 Bug）
-- [ ] 多 Jira Site 支持
 
 ## 📄 License
 
