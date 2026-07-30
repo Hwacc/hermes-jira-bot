@@ -282,6 +282,25 @@ fi
 echo ""
 
 # ============================================================
+# Step 3.5: Cloudflare Pages（可选）
+# ============================================================
+echo "━━━ Step 3.5: Cloudflare Pages（HTML 日报） ━━━"
+
+if [ -n "${CLOUDFLARE_API_TOKEN:-}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+    echo "  ✅ Cloudflare 凭证已配置"
+else
+    echo "  ℹ️  HTML 可视化日报需要 Cloudflare Pages（纯文本日报无需配置）"
+    echo "     如需启用，请在 $HERMES_ENV 中添加："
+    echo ""
+    echo "     CLOUDFLARE_API_TOKEN=your-cf-api-token"
+    echo "     CLOUDFLARE_ACCOUNT_ID=your-cf-account-id"
+    echo ""
+    echo "     Token 创建: https://dash.cloudflare.com/profile/api-tokens"
+    echo "     权限选 Account → Cloudflare Pages → Edit"
+fi
+echo ""
+
+# ============================================================
 # Step 4: Verify Connectivity
 # ============================================================
 echo "━━━ Step 4: 验证 Jira API 连通性 ━━━"
@@ -328,5 +347,8 @@ echo "    /jira-analyze CG-12345    分析指定 Bug"
 echo "    分析bug CG-12345           同上"
 echo ""
 echo "  Cron 日报创建后将在每天 9:00 自动推送。"
+echo ""
+echo "  💡 HTML 可视化日报需要额外配置 Cloudflare Pages，"
+echo "     详见 README 或 config/env.template"
 echo "  详情参考: $SCRIPT_DIR/README.md"
 echo ""
