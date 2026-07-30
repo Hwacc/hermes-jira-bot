@@ -8,8 +8,9 @@
 # 安装内容:
 #   1. 复制 skills (jira-analyze + jira-bug-digest) 到 ~/.hermes/skills/
 #   2. 交互式配置 Jira 凭证（JIRA_API_TOKEN / JIRA_USER_EMAIL / JIRA_CLOUD_ID）
-#   3. 创建推荐 cron job（早9 Bug 日报，使用 jira-bug-digest）
-#   4. 验证 Jira API 连通性
+#   3. 定制并创建 cron job（默认早 9 Bug 日报，使用 jira-bug-digest）
+#   4. 提示 Cloudflare Pages（HTML 日报可选）
+#   5. 验证 Jira API 连通性
 
 set -eu
 
@@ -73,12 +74,14 @@ _resolve_hermes_home() {
 HERMES_HOME="$(_resolve_hermes_home)"
 HERMES_ENV="$HERMES_HOME/.env"
 
-_load_jira_creds_from_env_file() {
+_load_creds_from_env_file() {
     # 仅填充尚未设置的变量，避免覆盖已有 export / quiet 模式凭证
     [ -f "$HERMES_ENV" ] || return 0
     local key val
     while IFS='=' read -r key val || [ -n "$key" ]; do
-        [[ "$key" =~ ^(JIRA_USER_EMAIL|JIRA_API_TOKEN|JIRA_CLOUD_ID)$ ]] || continue
+        [[ "$key" =~ ^(JIRA_USER_EMAIL|JIRA_API_TOKEN|JIRA_CLOUD_ID|CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID)$ ]] || continue
+        # 去掉 Windows .env 可能带的 \r
+        val="${val%$'\r'}"
         if [ -z "${!key:-}" ]; then
             export "$key=$val"
         fi
@@ -93,6 +96,64 @@ _find_python() {
             return 0
         fi
     done
+    return 1
+}
+
+# 解析日报调度：空 → 默认；9:00 / 9 → 每天固定时刻；5 段 cron → 原样
+# 成功打印 cron 表达式并 return 0；失败 return 1
+_parse_digest_schedule() {
+    local raw="${1:-}"
+    raw="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [ -z "$raw" ]; then
+        printf '%s\n' "0 9 * * *"
+        return 0
+    fi
+    # 友好时刻：H / H:MM / HH:MM
+    if [[ "$raw" =~ ^([01]?[0-9]|2[0-3])(:([0-5][0-9]))?$ ]]; then
+        local hour="${BASH_REMATCH[1]}"
+        local minute="${BASH_REMATCH[3]:-0}"
+        # 去掉小时前导零（08 → 8），分钟保留数值
+        hour=$((10#$hour))
+        minute=$((10#$minute))
+        printf '%s\n' "${minute} ${hour} * * *"
+        return 0
+    fi
+    # 标准 5 段 cron
+    local n
+    n=$(printf '%s' "$raw" | awk '{print NF}')
+    if [ "$n" = "5" ]; then
+        printf '%s\n' "$raw"
+        return 0
+    fi
+    return 1
+}
+
+_DIGEST_CRON_PROMPT='运行 jira_report.py 生成 HTML 日报'
+_DIGEST_CRON_NAME='jira-bug-daily-digest'
+
+_print_manual_cron() {
+    local schedule="$1"
+    echo "  ℹ️  可手动创建："
+    echo ""
+    echo "     hermes cron create '${schedule}' \\"
+    echo "       --name ${_DIGEST_CRON_NAME} \\"
+    echo "       --skill jira-bug-digest \\"
+    echo "       --prompt '${_DIGEST_CRON_PROMPT}'"
+    echo ""
+    echo "  📄 Cron 模板参考: cron/jobs.template.json"
+}
+
+_create_digest_cron() {
+    local schedule="$1"
+    if hermes cron create "$schedule" \
+        --name "$_DIGEST_CRON_NAME" \
+        --skill jira-bug-digest \
+        --prompt "$_DIGEST_CRON_PROMPT" 2>/dev/null; then
+        echo "  ✅ 已创建 cron job: ${_DIGEST_CRON_NAME} (${schedule})"
+        return 0
+    fi
+    echo "  ⚠️  自动创建失败，请手动执行："
+    _print_manual_cron "$schedule"
     return 1
 }
 
@@ -267,17 +328,28 @@ CRON_JOBS=$(hermes cron list 2>/dev/null || echo "")
 if echo "$CRON_JOBS" | grep -q "jira-bug-daily-digest"; then
     echo "  ⏭️  jira-bug-daily-digest cron job 已存在"
 else
-    echo "  配置 Bug 日报 cron job (推荐)..."
-    echo ""
-    echo "  ℹ️  Cron job 需手动创建："
-    echo ""
-    echo "     hermes cron create '0 9 * * *' --skills jira-bug-digest \\"
-    echo "       --prompt '运行 jira_report.py 生成 HTML 日报'"
-    echo ""
-    echo "     或在 Hermes 对话中输入："
-    echo "     「帮我创建一个 Jira Bug 日报 cron job，每天 9:00 执行」"
-    echo ""
-    echo "  📄 Cron 模板参考: cron/jobs.template.json"
+    SCHEDULE=""
+    if [ "$QUIET" = true ]; then
+        if ! SCHEDULE=$(_parse_digest_schedule "${JIRA_DIGEST_CRON:-}"); then
+            echo "  ❌ JIRA_DIGEST_CRON 无效: ${JIRA_DIGEST_CRON}"
+            echo "     请使用 '9:00' 或标准 cron（如 '0 9 * * *'）"
+            exit 1
+        fi
+        echo "  使用调度: $SCHEDULE"
+        _create_digest_cron "$SCHEDULE" || true
+    else
+        echo "  配置 Bug 日报 cron job（默认每天 09:00）"
+        echo "  可输入友好时间（如 9:00 / 09:30）或 cron（如 0 9 * * *）"
+        while true; do
+            read -r -p "  日报执行时间 [0 9 * * *]: " raw_schedule
+            if SCHEDULE=$(_parse_digest_schedule "$raw_schedule"); then
+                break
+            fi
+            echo "  ⚠️  格式无效，请重试（例: 9:00 或 0 9 * * *）"
+        done
+        echo "  使用调度: $SCHEDULE"
+        _create_digest_cron "$SCHEDULE" || true
+    fi
 fi
 echo ""
 
@@ -285,6 +357,9 @@ echo ""
 # Step 3.5: Cloudflare Pages（可选）
 # ============================================================
 echo "━━━ Step 3.5: Cloudflare Pages（HTML 日报） ━━━"
+
+# 先从 .env 补齐（含 Jira / Cloudflare），后续 Step 4 复用
+_load_creds_from_env_file
 
 if [ -n "${CLOUDFLARE_API_TOKEN:-}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
     echo "  ✅ Cloudflare 凭证已配置"
@@ -304,9 +379,6 @@ echo ""
 # Step 4: Verify Connectivity
 # ============================================================
 echo "━━━ Step 4: 验证 Jira API 连通性 ━━━"
-
-# 先从 .env 补齐凭证（交互安装只写入文件、未必 export）
-_load_jira_creds_from_env_file
 
 if [ -n "${JIRA_API_TOKEN:-}" ] && [ -n "${JIRA_CLOUD_ID:-}" ] && [ -n "${JIRA_USER_EMAIL:-}" ]; then
     if ! PY=$(_find_python); then

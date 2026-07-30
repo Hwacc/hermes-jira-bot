@@ -11,7 +11,7 @@
   3. 创建 cron job 指引
   4. 验证 Jira API 连通性
 """
-import os, sys, json, shutil, base64, getpass, subprocess
+import os, sys, json, shutil, base64, getpass, subprocess, re
 from pathlib import Path
 
 # Windows 控制台默认常是 GBK，避免打印 emoji/中文时 UnicodeEncodeError
@@ -100,6 +100,52 @@ def _find_hermes_cmd():
         if c.is_file() or c.is_symlink():
             return str(c)
     return None
+
+DIGEST_CRON_NAME = "jira-bug-daily-digest"
+DIGEST_CRON_PROMPT = "运行 jira_report.py 生成 HTML 日报"
+_FRIENDLY_TIME_RE = re.compile(r"^([01]?\d|2[0-3])(?::([0-5]\d))?$")
+
+def parse_digest_schedule(raw):
+    """Parse friendly time (9:00) or 5-field cron; empty → 0 9 * * *."""
+    text = (raw or "").strip()
+    if not text:
+        return "0 9 * * *"
+    m = _FRIENDLY_TIME_RE.match(text)
+    if m:
+        hour = int(m.group(1))
+        minute = int(m.group(2) or "0")
+        return f"{minute} {hour} * * *"
+    if len(text.split()) == 5:
+        return text
+    raise ValueError(f"invalid schedule: {raw!r}")
+
+def _print_manual_cron(schedule: str):
+    print("  ℹ️  可手动创建：")
+    print("")
+    print(f"     hermes cron create '{schedule}' \\")
+    print(f"       --name {DIGEST_CRON_NAME} \\")
+    print("       --skill jira-bug-digest \\")
+    print(f"       --prompt '{DIGEST_CRON_PROMPT}'")
+    print("")
+    print("  📄 Cron 模板参考: cron/jobs.template.json")
+
+def _create_digest_cron(schedule: str) -> bool:
+    cmd = HERMES_CMD or _find_hermes_cmd() or "hermes"
+    try:
+        r = subprocess.run(
+            [cmd, "cron", "create", schedule,
+             "--name", DIGEST_CRON_NAME,
+             "--skill", "jira-bug-digest",
+             "--prompt", DIGEST_CRON_PROMPT],
+            capture_output=True, text=True, timeout=30)
+        if r.returncode == 0:
+            _ok(f"已创建 cron job: {DIGEST_CRON_NAME} ({schedule})")
+            return True
+    except Exception:
+        pass
+    _warn("自动创建失败，请手动执行：")
+    _print_manual_cron(schedule)
+    return False
 
 # ── banner ─────────────────────────────────────────────
 
@@ -203,27 +249,59 @@ def step_2_credentials():
 def step_3_cron():
     print("━━━ Step 3: 创建 Cron Job ━━━")
 
+    cmd = HERMES_CMD or _find_hermes_cmd() or "hermes"
     try:
-        cmd = HERMES_CMD or _find_hermes_cmd() or "hermes"
         r = subprocess.run([cmd, "cron", "list"], capture_output=True, text=True, timeout=10)
-        if "jira-bug-daily-digest" in (r.stdout + r.stderr):
-            _skip("jira-bug-daily-digest cron job 已存在")
+        if DIGEST_CRON_NAME in (r.stdout + r.stderr):
+            _skip(f"{DIGEST_CRON_NAME} cron job 已存在")
             print("")
             return
     except Exception:
         pass
 
-    print("  配置 Bug 日报 cron job (推荐)...")
+    if QUIET:
+        try:
+            schedule = parse_digest_schedule(os.environ.get("JIRA_DIGEST_CRON"))
+        except ValueError:
+            _err("JIRA_DIGEST_CRON 无效，请使用 '9:00' 或标准 cron（如 '0 9 * * *'）")
+        print(f"  使用调度: {schedule}")
+        _create_digest_cron(schedule)
+        print("")
+        return
+
+    print("  配置 Bug 日报 cron job（默认每天 09:00）")
+    print("  可输入友好时间（如 9:00 / 09:30）或 cron（如 0 9 * * *）")
+    while True:
+        raw = input("  日报执行时间 [0 9 * * *]: ")
+        try:
+            schedule = parse_digest_schedule(raw)
+            break
+        except ValueError:
+            print("  ⚠️  格式无效，请重试（例: 9:00 或 0 9 * * *）")
+    print(f"  使用调度: {schedule}")
+    _create_digest_cron(schedule)
     print("")
-    print("  ℹ️  Cron job 需手动创建：")
-    print("")
-    print("     hermes cron create '0 9 * * *' --skills jira-bug-digest \\")
-    print("       --prompt '运行 jira_report.py 生成 HTML 日报'")
-    print("")
-    print("     或在 Hermes 对话中输入：")
-    print("     「帮我创建一个 Jira Bug 日报 cron job，每天 9:00 执行」")
-    print("")
-    print("  📄 Cron 模板参考: cron/jobs.template.json")
+
+# ── Step 3.5: Cloudflare Pages（可选）───────────────────
+
+def step_3_5_cloudflare():
+    print("━━━ Step 3.5: Cloudflare Pages（HTML 日报） ━━━")
+
+    creds = _load_env()
+    cf_token = os.environ.get("CLOUDFLARE_API_TOKEN") or creds.get("CLOUDFLARE_API_TOKEN", "")
+    cf_account = os.environ.get("CLOUDFLARE_ACCOUNT_ID") or creds.get("CLOUDFLARE_ACCOUNT_ID", "")
+
+    if cf_token and cf_account:
+        _ok("Cloudflare 凭证已配置")
+    else:
+        print("  ℹ️  HTML 可视化日报需要 Cloudflare Pages（纯文本日报无需配置）")
+        print(f"     如需启用，请在 {HERMES_ENV} 中添加：")
+        print("")
+        print("     CLOUDFLARE_API_TOKEN=your-cf-api-token")
+        print("     CLOUDFLARE_ACCOUNT_ID=your-cf-account-id")
+        print("")
+        print("     Token 创建: https://dash.cloudflare.com/profile/api-tokens")
+        print("     权限选 Account → Cloudflare Pages → Edit")
     print("")
 
 # ── Step 4: verify ─────────────────────────────────────
@@ -266,6 +344,9 @@ def done():
     print("    分析bug CG-12345           同上")
     print("")
     print("  Cron 日报创建后将在每天 9:00 自动推送。")
+    print("")
+    print("  💡 HTML 可视化日报需要额外配置 Cloudflare Pages，")
+    print("     详见 README 或 config/env.template")
     print(f"  详情参考: {SCRIPT_DIR / 'README.md'}")
     print("")
 
@@ -277,5 +358,6 @@ if __name__ == "__main__":
     step_1_install_skills()
     step_2_credentials()
     step_3_cron()
+    step_3_5_cloudflare()
     step_4_verify()
     done()

@@ -23,6 +23,7 @@ description: "定时推送 Jira 工作日报——查询所有类型待办，生
 | `JIRA_ASSIGNEE` | （可选）Account ID 过滤，默认 currentUser() |
 | `JIRA_SITE_URL` | （可选）Jira 站点 URL |
 | `JIRA_USER_DISPLAY` | （可选）报表中的显示名 |
+| `CLOUDFLARE_API_TOKEN` | （可选）Cloudflare API Token，供 wrangler Pages 部署 |
 | `CLOUDFLARE_ACCOUNT_ID` | （可选）Cloudflare account ID，跳过自动发现 |
 
 ## 两种模式

@@ -8,6 +8,7 @@ Env vars:
   JIRA_ASSIGNEE         — (optional) Account ID filter
   JIRA_SITE_URL         — (optional) Jira site URL for links; defaults to env-based guess
   JIRA_USER_DISPLAY     — (optional) Display name in header; defaults to "User"
+  CLOUDFLARE_API_TOKEN  — (optional) Cloudflare API token for wrangler Pages deploy
   CLOUDFLARE_ACCOUNT_ID — (optional) wrangler account ID
 """
 import json, os, sys, time, subprocess, base64, urllib.request
