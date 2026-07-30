@@ -23,7 +23,15 @@
 ```bash
 git clone https://github.com/Hwacc/hermes-jira-bot.git
 cd hermes-jira-bot
+
+# Linux / macOS / git-bash
 bash install.sh
+
+# Windows / 跨平台
+python install.py
+
+# 静默安装（预设环境变量）
+python install.py --quiet
 ```
 
 安装脚本会：

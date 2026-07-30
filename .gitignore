@@ -18,3 +18,5 @@ __pycache__/
 *.env
 !*.env.template
 !*.env.example
+test-install.sh
+.wrangler/
