@@ -63,6 +63,8 @@ JIRA_CLOUD_ID=your-cloud-instance-id
 cp -r skills/jira-analyze ~/.hermes/skills/
 cp -r skills/jira-bug-digest ~/.hermes/skills/
 cp -r skills/jira-fix ~/.hermes/skills/
+cp -r skills/jira-code-fix ~/.hermes/skills/
+cp -r skills/jira-bot-engineering ~/.hermes/skills/
 ```
 
 `/fix` 另需：本机 `config/repos.json`、Bitbucket App Password（见 `config/env.template`）、已登录的 `claude` CLI。
@@ -124,17 +126,20 @@ hermes cron create "0 9 * * *" \
 ```
 hermes-jira-bot/
 ├── README.md
-├── install.sh                       # 一键安装脚本
+├── VERSION
+├── install.sh / install.py             # 一键安装脚本
 ├── skills/
-│   ├── jira-analyze/                # Bug 分析 skill
-│   ├── jira-bug-digest/             # 日报 skill
-│   └── jira-fix/                    # /fix 编排（repos 解析 + worktree + PR）
+│   ├── jira-analyze/                   # Bug 分析（难度/工时/根因）
+│   ├── jira-bug-digest/                # 定时日报
+│   ├── jira-fix/                       # /fix 编排（repos 解析 + worktree + PR）
+│   ├── jira-code-fix/                  # /fix 流程定义（skill 层面）
+│   └── jira-bot-engineering/           # 工程化规范
 ├── config/
-│   ├── env.template                 # 环境变量模板
-│   ├── repos.template.json          # Ticket→仓库映射模板（可提交）
-│   └── repos.json                   # 本机映射（gitignore，从 template 复制）
+│   ├── env.template                    # 环境变量模板
+│   ├── repos.template.json             # Ticket→仓库映射模板（可提交）
+│   └── repos.json                      # 本机映射（gitignore，从 template 复制）
 └── cron/
-    └── jobs.template.json           # Cron job 配置参考
+    └── jobs.template.json              # Cron job 配置参考
 ```
 
 ### Ticket → 仓库映射（Claude Code /fix 用）
