@@ -37,12 +37,13 @@ python install.py --quiet
 # 可选: JIRA_DELIVER='qqbot:<chat_id>'（默认 origin）
 ```
 
-安装脚本会：
-1. 复制 skills 到 `~/.hermes/skills/`（WSL/Windows 下为 Hermes 实际数据目录）
+安装 / 升级脚本会：
+1. **安装或覆盖更新** skills（含 `jira-analyze` / `jira-bug-digest` / `jira-fix`）
 2. 交互式引导配置 Jira 凭证
 3. 询问日报执行时间与投递目标，并创建 cron job
 4. 提示 Cloudflare Pages（HTML 日报可选）
-5. 验证 Jira API 连通性
+5. 配置 Bitbucket（`/fix` 建 PR）并引导生成 `config/repos.json`
+6. 验证 Jira / Bitbucket API 连通性；检测 `claude` CLI
 
 静默安装需预设 `JIRA_USER_EMAIL` / `JIRA_API_TOKEN` / `JIRA_CLOUD_ID`；可用 `JIRA_DIGEST_CRON` 定制调度、`JIRA_DELIVER` 定制投递。
 

@@ -2,14 +2,16 @@
 """Hermes Jira Bot — 一键安装脚本 (Python 版)
 
 用法:
-  python install.py           交互式安装
+  python install.py           交互式安装 / 升级
   python install.py --quiet   静默安装（需环境变量已设）
 
 安装内容:
-  1. 复制 skills 到 Hermes 目录
-  2. 交互式配置 Jira 凭证
-  3. 创建 cron job 指引
-  4. 验证 Jira API 连通性
+  1. 安装/更新 skills（jira-analyze / jira-bug-digest / jira-fix 等）
+  2. 配置 Jira 凭证
+  3. 创建 Bug 日报 cron
+  3.5 Cloudflare Pages（HTML 日报，可选）
+  3.6 Bitbucket + repos.json（/fix 建 PR，可选）
+  4. 验证 Jira（及可选 Bitbucket）连通性
 """
 import os, sys, json, shutil, base64, getpass, subprocess, re
 from pathlib import Path
@@ -73,9 +75,24 @@ def _load_env():
     return env
 
 def _save_env(key, val):
-    """Append a line to .env."""
-    with open(HERMES_ENV, "a", encoding="utf-8") as f:
-        f.write(f"{key}={val}\n")
+    """Upsert key=value in Hermes .env (avoid duplicate keys on re-install)."""
+    lines = []
+    found = False
+    if HERMES_ENV.exists():
+        for line in HERMES_ENV.read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith("#") or "=" not in line:
+                lines.append(line)
+                continue
+            k = line.split("=", 1)[0].strip()
+            if k == key:
+                lines.append(f"{key}={val}")
+                found = True
+            else:
+                lines.append(line)
+    if not found:
+        lines.append(f"{key}={val}")
+    HERMES_ENV.parent.mkdir(parents=True, exist_ok=True)
+    HERMES_ENV.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 def _find_hermes_cmd():
     """Resolve Hermes CLI across Linux/macOS/Windows layouts."""
@@ -177,6 +194,7 @@ def banner():
     print("")
     print("  ╔══════════════════════════════════════════╗")
     print("  ║     🧭  Hermes Jira Bot Installer        ║")
+    print("  ║     日报 · /jira-analyze · /fix          ║")
     print("  ╚══════════════════════════════════════════╝")
     print("")
 
@@ -210,15 +228,23 @@ def step_0_check():
         _err(f"Hermes 目录未找到: {HERMES_HOME}\n"
               f"     请先运行 hermes 一次以初始化配置")
     _ok(f"Hermes 目录: {HERMES_HOME}")
+
+    # /fix needs Claude Code CLI (optional warning)
+    claude = shutil.which("claude")
+    if claude:
+        _ok(f"claude CLI 可用（/fix）: {claude}")
+    else:
+        _warn("未检测到 claude CLI — /fix 自动修复需要 Claude Code（OAuth 已登录）")
     print("")
 
 # ── Step 1: install skills ─────────────────────────────
 
 def step_1_install_skills():
-    print("━━━ Step 1: 安装 Skills ━━━")
+    print("━━━ Step 1: 安装 / 更新 Skills ━━━")
     src_dir = SCRIPT_DIR / "skills"
     SKILLS_DST.mkdir(parents=True, exist_ok=True)
 
+    installed = []
     for skill_dir in sorted(src_dir.iterdir()):
         skill_md = skill_dir / "SKILL.md"
         if not skill_md.is_file():
@@ -226,10 +252,17 @@ def step_1_install_skills():
         name = skill_dir.name
         dest = SKILLS_DST / name
         if dest.exists():
-            _skip(f"{name} — 已存在，跳过")
+            shutil.rmtree(dest)
+            shutil.copytree(skill_dir, dest)
+            _ok(f"{name} — 已更新")
         else:
             shutil.copytree(skill_dir, dest)
             _ok(f"{name} — 已安装")
+        installed.append(name)
+
+    if "jira-fix" not in installed:
+        _warn("未找到 jira-fix skill（/fix 将不可用）")
+    print(f"  → skills 目录: {SKILLS_DST}")
     print("")
 
 # ── Step 2: credentials ────────────────────────────────
@@ -341,7 +374,7 @@ def step_3_5_cloudflare():
 # ── Step 3.6: Bitbucket + repos.json（/fix）────────────
 
 def step_3_6_bitbucket():
-    print("━━━ Step 3.6: Bitbucket（/fix 建 PR，可选） ━━━")
+    print("━━━ Step 3.6: Bitbucket + repos.json（/fix） ━━━")
 
     creds = _load_env()
     bb_user = os.environ.get("BITBUCKET_USERNAME") or creds.get("BITBUCKET_USERNAME", "")
@@ -375,19 +408,31 @@ def step_3_6_bitbucket():
         if not (bb_user and bb_pass):
             print("  ⏭️  已跳过 Bitbucket（之后可写入 Hermes .env）")
 
+    # repos.json：本机映射（gitignore）；缺失则从 template 复制一份供编辑
     repos = SCRIPT_DIR / "config" / "repos.json"
     template = SCRIPT_DIR / "config" / "repos.template.json"
     if repos.is_file():
         _ok(f"repos.json 已存在: {repos}")
+    elif template.is_file():
+        if QUIET:
+            shutil.copy2(template, repos)
+            _ok(f"已从 template 生成 repos.json（请编辑 path）: {repos}")
+        else:
+            ans = input("  尚未配置 repos.json，是否从 template 复制一份？ [Y/n]: ").strip().lower()
+            if ans in ("", "y", "yes"):
+                shutil.copy2(template, repos)
+                _ok(f"已生成: {repos}")
+                print("     请编辑其中的 path / workspace / repo 后再用 /fix")
+            else:
+                print(f"  ⏭️  跳过。需要时: copy {template} → {repos}")
     else:
-        print("  ℹ️  /fix 仓库映射：请复制并编辑本机路径")
-        print(f"     cp {template} {repos}")
+        _warn("未找到 config/repos.template.json")
     print("")
 
 # ── Step 4: verify ─────────────────────────────────────
 
 def step_4_verify():
-    print("━━━ Step 4: 验证 Jira API 连通性 ━━━")
+    print("━━━ Step 4: 验证连通性 ━━━")
 
     creds = _load_env()
     email = os.environ.get("JIRA_USER_EMAIL") or creds.get("JIRA_USER_EMAIL", "")
@@ -395,21 +440,37 @@ def step_4_verify():
     cid   = os.environ.get("JIRA_CLOUD_ID") or creds.get("JIRA_CLOUD_ID", "")
 
     if not (email and token and cid):
-        _skip("跳过（凭证未完全配置）")
-        print("")
-        return
+        _skip("Jira：凭证未完全配置，跳过")
+    else:
+        try:
+            import urllib.request
+            auth = base64.b64encode(f"{email}:{token}".encode()).decode()
+            req = urllib.request.Request(
+                f"https://api.atlassian.com/ex/jira/{cid}/rest/api/3/myself",
+                headers={"Authorization": f"Basic {auth}", "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                data = json.loads(r.read())
+            _ok(f"Jira API 连通！已认证用户: {data.get('displayName', 'OK')}")
+        except Exception:
+            _warn("Jira API 验证失败，请检查凭证是否正确")
 
-    try:
-        import urllib.request
-        auth = base64.b64encode(f"{email}:{token}".encode()).decode()
-        req = urllib.request.Request(
-            f"https://api.atlassian.com/ex/jira/{cid}/rest/api/3/myself",
-            headers={"Authorization": f"Basic {auth}", "Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            data = json.loads(r.read())
-        _ok(f"Jira API 连通！已认证用户: {data.get('displayName', 'OK')}")
-    except Exception:
-        _warn("Jira API 验证失败，请检查凭证是否正确")
+    bb_user = os.environ.get("BITBUCKET_USERNAME") or creds.get("BITBUCKET_USERNAME", "")
+    bb_pass = os.environ.get("BITBUCKET_APP_PASSWORD") or creds.get("BITBUCKET_APP_PASSWORD", "")
+    if bb_user and bb_pass:
+        try:
+            import urllib.request
+            auth = base64.b64encode(f"{bb_user}:{bb_pass}".encode()).decode()
+            req = urllib.request.Request(
+                "https://api.bitbucket.org/2.0/user",
+                headers={"Authorization": f"Basic {auth}", "Accept": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as r:
+                data = json.loads(r.read())
+            _ok(f"Bitbucket API 连通！用户: {data.get('display_name') or data.get('username') or 'OK'}")
+        except Exception:
+            _warn("Bitbucket API 验证失败，请检查 App Password 权限")
+    else:
+        _skip("Bitbucket：未配置，/fix 建 PR 将失败（可稍后补）")
     print("")
 
 # ── done ───────────────────────────────────────────────
@@ -419,15 +480,15 @@ def done():
     print("  ║     ✅  安装完成！                        ║")
     print("  ╚══════════════════════════════════════════╝")
     print("")
-    print("  使用方法:")
-    print("    /jira-analyze CG-12345    分析指定 Bug")
-    print("    /fix 1  或  /fix CG-12345  自动修复并建 PR")
+    print("  功能与用法:")
+    print("    📊 日报     cron 每天推送待办 Bug（jira-bug-digest）")
+    print("    🔍 分析     /jira-analyze CG-1 CG-2   → 编号列表 + Jira 评论")
+    print("    🔧 修复     回复 1 / /fix 1,2 / /fix CG-xxx → worktree + PR")
+    print("    🧩 Overlay  /fix KEY overlay          → 强制产品线")
     print("")
-    print("  Cron 日报创建后将在每天 9:00 自动推送。")
-    print("")
-    print("  💡 HTML 日报 → Cloudflare；/fix PR → Bitbucket + repos.json")
-    print("     详见 README 或 config/env.template")
-    print(f"  详情参考: {SCRIPT_DIR / 'README.md'}")
+    print("  /fix 依赖: Bitbucket 凭证 + config/repos.json + claude CLI")
+    print("  HTML 日报: Cloudflare Pages（可选）")
+    print(f"  详情: {SCRIPT_DIR / 'README.md'}")
     print("")
 
 # ── main ───────────────────────────────────────────────

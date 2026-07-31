@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# install.sh — Hermes Jira Bot 一键安装脚本
+# install.sh — Hermes Jira Bot 一键安装 / 升级脚本
 #
 # 用法:
-#   bash install.sh          # 交互式安装（推荐）
+#   bash install.sh          # 交互式安装 / 升级（推荐）
 #   bash install.sh --quiet  # 静默安装（需要环境变量已配好）
 #
 # 安装内容:
-#   1. 复制 skills (jira-analyze / jira-bug-digest / jira-fix) 到 ~/.hermes/skills/
-#   2. 交互式配置 Jira 凭证（JIRA_API_TOKEN / JIRA_USER_EMAIL / JIRA_CLOUD_ID）
-#   3. 定制并创建 cron job（默认早 9 Bug 日报，使用 jira-bug-digest）
-#   4. 提示 Cloudflare Pages（HTML 日报可选）
-#   5. 验证 Jira API 连通性
+#   1. 安装/更新 skills（jira-analyze / jira-bug-digest / jira-fix 等）
+#   2. 配置 Jira 凭证
+#   3. 创建 Bug 日报 cron（jira-bug-digest）
+#   3.5 Cloudflare Pages（HTML 日报，可选）
+#   3.6 Bitbucket + repos.json（/fix 建 PR，可选）
+#   4. 验证 Jira / Bitbucket 连通性
 
 set -eu
 
@@ -86,6 +87,21 @@ _load_creds_from_env_file() {
             export "$key=$val"
         fi
     done < "$HERMES_ENV"
+}
+
+# Upsert KEY=VAL into Hermes .env（重装时不产生重复行）
+_upsert_env() {
+    local key="$1" val="$2" tmp
+    touch "$HERMES_ENV"
+    tmp=$(mktemp)
+    if grep -q "^${key}=" "$HERMES_ENV" 2>/dev/null; then
+        # 兼容 macOS/BSD sed：用临时文件重写
+        awk -v k="$key" -v v="$val" 'BEGIN{FS=OFS="="} $1==k{$0=k"="v} {print}' "$HERMES_ENV" > "$tmp"
+        mv "$tmp" "$HERMES_ENV"
+    else
+        rm -f "$tmp"
+        printf '%s=%s\n' "$key" "$val" >> "$HERMES_ENV"
+    fi
 }
 
 _find_python() {
@@ -296,28 +312,42 @@ if [ ! -d "$HERMES_HOME" ]; then
     exit 1
 fi
 echo "  ✅ Hermes 目录: $HERMES_HOME"
+
+if command -v claude &>/dev/null; then
+    echo "  ✅ claude CLI 可用（/fix）: $(command -v claude)"
+else
+    echo "  ⚠️  未检测到 claude CLI — /fix 自动修复需要 Claude Code（OAuth 已登录）"
+fi
 echo ""
 
 # ============================================================
-# Step 1: Install Skills
+# Step 1: Install / Update Skills
 # ============================================================
-echo "━━━ Step 1: 安装 Skills ━━━"
+echo "━━━ Step 1: 安装 / 更新 Skills ━━━"
 
 SKILL_DIR="$HERMES_HOME/skills"
 mkdir -p "$SKILL_DIR"
+HAS_JIRA_FIX=false
 
 for skill in "$SCRIPT_DIR/skills/"*; do
     if [ -f "$skill/SKILL.md" ]; then
         name=$(basename "$skill")
         dest="$SKILL_DIR/$name"
         if [ -d "$dest" ]; then
-            echo "  ⏭️  $name — 已存在，跳过"
+            rm -rf "$dest"
+            cp -r "$skill" "$dest"
+            echo "  ✅ $name — 已更新"
         else
             cp -r "$skill" "$dest"
             echo "  ✅ $name — 已安装"
         fi
+        [ "$name" = "jira-fix" ] && HAS_JIRA_FIX=true
     fi
 done
+if [ "$HAS_JIRA_FIX" != true ]; then
+    echo "  ⚠️  未找到 jira-fix skill（/fix 将不可用）"
+fi
+echo "  → skills 目录: $SKILL_DIR"
 echo ""
 
 # ============================================================
@@ -339,8 +369,7 @@ else
         current=$(grep "^${var}=" "$HERMES_ENV" 2>/dev/null | cut -d= -f2- || echo "")
         if [ -z "$current" ] && [ -n "${!var:-}" ]; then
             current="${!var}"
-            # 持久化到 .env，方便后续 Hermes 进程读取
-            echo "${var}=${current}" >> "$HERMES_ENV"
+            _upsert_env "$var" "$current"
         fi
         if [ -n "$current" ]; then
             echo "  ✅ $var — 已配置"
@@ -358,7 +387,7 @@ else
                     ;;
             esac
             if [ -n "$val" ]; then
-                echo "${var}=${val}" >> "$HERMES_ENV"
+                _upsert_env "$var" "$val"
                 echo "  ✅ $var — 已保存"
             fi
         fi
@@ -437,7 +466,7 @@ echo ""
 # ============================================================
 # Step 3.6: Bitbucket（/fix 建 PR，可选）
 # ============================================================
-echo "━━━ Step 3.6: Bitbucket（/fix 建 PR，可选） ━━━"
+echo "━━━ Step 3.6: Bitbucket + repos.json（/fix） ━━━"
 
 _load_creds_from_env_file
 
@@ -450,19 +479,16 @@ else
     echo "  /fix 自动创建 Bitbucket PR 需要 App Password（回车可跳过）"
     echo "  创建: Bitbucket → Personal settings → App passwords"
     echo "  权限: Repositories Read + Pull requests Write"
-    if [ -z "${BITBUCKET_USERNAME:-}" ]; then
-        current=$(grep "^BITBUCKET_USERNAME=" "$HERMES_ENV" 2>/dev/null | cut -d= -f2- || echo "")
-        if [ -n "$current" ]; then
-            echo "  ✅ BITBUCKET_USERNAME — 已配置"
-        else
-            read -r -p "  BITBUCKET_USERNAME: " val
-            if [ -n "$val" ]; then
-                echo "BITBUCKET_USERNAME=${val}" >> "$HERMES_ENV"
-                echo "  ✅ BITBUCKET_USERNAME — 已保存"
-            fi
-        fi
-    else
+    current=$(grep "^BITBUCKET_USERNAME=" "$HERMES_ENV" 2>/dev/null | cut -d= -f2- || echo "")
+    if [ -n "${BITBUCKET_USERNAME:-}" ] || [ -n "$current" ]; then
         echo "  ✅ BITBUCKET_USERNAME — 已配置"
+    else
+        read -r -p "  BITBUCKET_USERNAME: " val
+        if [ -n "$val" ]; then
+            _upsert_env "BITBUCKET_USERNAME" "$val"
+            export BITBUCKET_USERNAME="$val"
+            echo "  ✅ BITBUCKET_USERNAME — 已保存"
+        fi
     fi
     current_pw=$(grep "^BITBUCKET_APP_PASSWORD=" "$HERMES_ENV" 2>/dev/null | cut -d= -f2- || echo "")
     if [ -n "${BITBUCKET_APP_PASSWORD:-}" ] || [ -n "$current_pw" ]; then
@@ -471,7 +497,8 @@ else
         read -r -s -p "  BITBUCKET_APP_PASSWORD: " val
         echo ""
         if [ -n "$val" ]; then
-            echo "BITBUCKET_APP_PASSWORD=${val}" >> "$HERMES_ENV"
+            _upsert_env "BITBUCKET_APP_PASSWORD" "$val"
+            export BITBUCKET_APP_PASSWORD="$val"
             echo "  ✅ BITBUCKET_APP_PASSWORD — 已保存"
         else
             echo "  ⏭️  已跳过 Bitbucket（之后可写入 Hermes .env）"
@@ -479,22 +506,40 @@ else
     fi
 fi
 
-if [ -f "$SCRIPT_DIR/config/repos.json" ]; then
-    echo "  ✅ repos.json 已存在: $SCRIPT_DIR/config/repos.json"
+REPOS_JSON="$SCRIPT_DIR/config/repos.json"
+REPOS_TPL="$SCRIPT_DIR/config/repos.template.json"
+if [ -f "$REPOS_JSON" ]; then
+    echo "  ✅ repos.json 已存在: $REPOS_JSON"
+elif [ -f "$REPOS_TPL" ]; then
+    if [ "$QUIET" = true ]; then
+        cp "$REPOS_TPL" "$REPOS_JSON"
+        echo "  ✅ 已从 template 生成 repos.json（请编辑 path）: $REPOS_JSON"
+    else
+        read -r -p "  尚未配置 repos.json，是否从 template 复制一份？ [Y/n]: " ans
+        ans=$(printf '%s' "${ans:-Y}" | tr '[:upper:]' '[:lower:]')
+        if [ -z "$ans" ] || [ "$ans" = "y" ] || [ "$ans" = "yes" ]; then
+            cp "$REPOS_TPL" "$REPOS_JSON"
+            echo "  ✅ 已生成: $REPOS_JSON"
+            echo "     请编辑其中的 path / workspace / repo 后再用 /fix"
+        else
+            echo "  ⏭️  跳过。需要时: cp $REPOS_TPL $REPOS_JSON"
+        fi
+    fi
 else
-    echo "  ℹ️  /fix 仓库映射：请复制并编辑本机路径"
-    echo "     cp $SCRIPT_DIR/config/repos.template.json $SCRIPT_DIR/config/repos.json"
+    echo "  ⚠️  未找到 config/repos.template.json"
 fi
 echo ""
 
 # ============================================================
 # Step 4: Verify Connectivity
 # ============================================================
-echo "━━━ Step 4: 验证 Jira API 连通性 ━━━"
+echo "━━━ Step 4: 验证连通性 ━━━"
+
+_load_creds_from_env_file
 
 if [ -n "${JIRA_API_TOKEN:-}" ] && [ -n "${JIRA_CLOUD_ID:-}" ] && [ -n "${JIRA_USER_EMAIL:-}" ]; then
     if ! PY=$(_find_python); then
-        echo "  ⏭️  跳过（未找到 Python）"
+        echo "  ⏭️  Jira：跳过（未找到 Python）"
     else
         VERIFY_OUT=$("$PY" -c "
 import os,json,base64,urllib.request
@@ -515,7 +560,29 @@ print(d.get('displayName','OK'))
         fi
     fi
 else
-    echo "  ⏭️  跳过（凭证未完全配置）"
+    echo "  ⏭️  Jira：凭证未完全配置，跳过"
+fi
+
+if [ -n "${BITBUCKET_USERNAME:-}" ] && [ -n "${BITBUCKET_APP_PASSWORD:-}" ]; then
+    if PY=$(_find_python); then
+        BB_OUT=$("$PY" -c "
+import os,json,base64,urllib.request
+u=os.environ.get('BITBUCKET_USERNAME','')
+p=os.environ.get('BITBUCKET_APP_PASSWORD','')
+auth=base64.b64encode(f'{u}:{p}'.encode()).decode()
+req=urllib.request.Request('https://api.bitbucket.org/2.0/user',headers={'Authorization':f'Basic {auth}','Accept':'application/json'})
+with urllib.request.urlopen(req, timeout=15) as r:
+    d=json.loads(r.read())
+print(d.get('display_name') or d.get('username') or 'OK')
+" 2>&1) || BB_OUT="FAILED"
+        if [ "$BB_OUT" = "FAILED" ]; then
+            echo "  ⚠️  Bitbucket API 验证失败，请检查 App Password 权限"
+        else
+            echo "  ✅ Bitbucket API 连通！用户: $BB_OUT"
+        fi
+    fi
+else
+    echo "  ⏭️  Bitbucket：未配置，/fix 建 PR 将失败（可稍后补）"
 fi
 echo ""
 
@@ -526,13 +593,13 @@ echo "  ╔═══════════════════════
 echo "  ║     ✅  安装完成！                        ║"
 echo "  ╚══════════════════════════════════════════╝"
 echo ""
-echo "  使用方法:"
-echo "    /jira-analyze CG-12345    分析指定 Bug"
-echo "    /fix 1  或  /fix CG-12345  自动修复并建 PR"
+echo "  功能与用法:"
+echo "    📊 日报     cron 每天推送待办 Bug（jira-bug-digest）"
+echo "    🔍 分析     /jira-analyze CG-1 CG-2   → 编号列表 + Jira 评论"
+echo "    🔧 修复     回复 1 / /fix 1,2 / /fix CG-xxx → worktree + PR"
+echo "    🧩 Overlay  /fix KEY overlay          → 强制产品线"
 echo ""
-echo "  Cron 日报创建后将在每天 9:00 自动推送。"
-echo ""
-echo "  💡 HTML 日报 → Cloudflare；/fix PR → Bitbucket + repos.json"
-echo "     详见 README 或 config/env.template"
+echo "  /fix 依赖: Bitbucket 凭证 + config/repos.json + claude CLI"
+echo "  HTML 日报: Cloudflare Pages（可选）"
 echo "  详情参考: $SCRIPT_DIR/README.md"
 echo ""
