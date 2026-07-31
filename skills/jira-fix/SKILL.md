@@ -18,8 +18,13 @@ triggers:
 - `/fix 1` / `/fix 1 2` / `/fix 1,2`（依赖上一轮 `/jira-analyze` 的编号 session，TTL 30 分钟）
 - 用户**只回复** `1` / `1,2` / `1 2`（无其它文字）→ 同等视为 `/fix` 编号
 - 末尾可加产品线：`/fix CG-xxx overlay` 或 `/fix 1 overlay`
+- **指定 Fix Agent（单次，不改默认）**：自然语言或命令末尾带上即可  
+  - 「修复 CG-xxx 使用 cursor」「/fix CG-xxx 用 cursor」「/fix 1 cursor」  
+  - 「使用 claude」同理  
+  - 等价 CLI：`--agent cursor` / `--agent claude`
 
-**不要**把 Hermes 分析出的根因/建议喂给 Fix Agent；脚本只读 Jira 原始字段。
+**不要**把 Hermes 分析出的根因/建议喂给 Fix Agent；脚本只读 Jira 原始字段。  
+例外：若评论中有本 bot 写入的最新 **PR Declined** 记录，会把拒绝原因注入 Fix Agent prompt（指导重修）。
 
 ## 前置条件
 
@@ -29,27 +34,32 @@ triggers:
 | `BITBUCKET_USERNAME` / `BITBUCKET_APP_PASSWORD` | Bitbucket 建 PR |
 | 本机仓库根目录 `config/repos.json` | 从 template 复制 |
 | `claude` CLI | 默认 Agent；基建失败回退 Cursor |
+| `agent` / Cursor Agent CLI | 用户指定 `cursor` 时需要 |
 
 ## 交互（必须遵守）
+
+若用户指定了 Agent（cursor / claude），**两步命令都必须带上** `--agent <name>`（或把 `cursor`/`claude`/`使用cursor` 作为 targets 末尾 token，脚本会识别）。
 
 1. **先**用脚本解析目标（不跑修复），立刻回复用户「已开始」：
 
 ```
-python "{skillDir}/scripts/jira_fix.py" <targets...> --resolve-only
+python "{skillDir}/scripts/jira_fix.py" <targets...> [--agent cursor|claude] --resolve-only
 ```
 
-把 JSON 里的 `message_qq` 发给用户（例如 `🔧 已开始修复 CG-20926…`）。
+把 JSON 里的 `message_qq` 发给用户（例如 `🔧 已开始修复 CG-20926（agent=cursor）…`）。
 
 2. **再**跑全流程（可多 KEY，脚本内严格串行）：
 
 ```
-python "{skillDir}/scripts/jira_fix.py" <targets...>
+python "{skillDir}/scripts/jira_fix.py" <targets...> [--agent cursor|claude]
 ```
 
 示例：
 
 ```
 python "{skillDir}/scripts/jira_fix.py" CG-20926
+python "{skillDir}/scripts/jira_fix.py" CG-20926 --agent cursor
+python "{skillDir}/scripts/jira_fix.py" CG-20926 使用cursor
 python "{skillDir}/scripts/jira_fix.py" 1 2
 python "{skillDir}/scripts/jira_fix.py" 1,2 overlay
 python "{skillDir}/scripts/jira_fix.py" CG-20926 --dry-run
