@@ -6,7 +6,7 @@
 #   bash install.sh --quiet  # 静默安装（需要环境变量已配好）
 #
 # 安装内容:
-#   1. 复制 skills (jira-analyze + jira-bug-digest) 到 ~/.hermes/skills/
+#   1. 复制 skills (jira-analyze / jira-bug-digest / jira-fix) 到 ~/.hermes/skills/
 #   2. 交互式配置 Jira 凭证（JIRA_API_TOKEN / JIRA_USER_EMAIL / JIRA_CLOUD_ID）
 #   3. 定制并创建 cron job（默认早 9 Bug 日报，使用 jira-bug-digest）
 #   4. 提示 Cloudflare Pages（HTML 日报可选）
@@ -79,7 +79,7 @@ _load_creds_from_env_file() {
     [ -f "$HERMES_ENV" ] || return 0
     local key val
     while IFS='=' read -r key val || [ -n "$key" ]; do
-        [[ "$key" =~ ^(JIRA_USER_EMAIL|JIRA_API_TOKEN|JIRA_CLOUD_ID|JIRA_DIGEST_CRON|JIRA_DELIVER|CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID)$ ]] || continue
+        [[ "$key" =~ ^(JIRA_USER_EMAIL|JIRA_API_TOKEN|JIRA_CLOUD_ID|JIRA_DIGEST_CRON|JIRA_DELIVER|CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID|BITBUCKET_USERNAME|BITBUCKET_APP_PASSWORD)$ ]] || continue
         # 去掉 Windows .env 可能带的 \r
         val="${val%$'\r'}"
         if [ -z "${!key:-}" ]; then
@@ -435,6 +435,59 @@ fi
 echo ""
 
 # ============================================================
+# Step 3.6: Bitbucket（/fix 建 PR，可选）
+# ============================================================
+echo "━━━ Step 3.6: Bitbucket（/fix 建 PR，可选） ━━━"
+
+_load_creds_from_env_file
+
+if [ -n "${BITBUCKET_USERNAME:-}" ] && [ -n "${BITBUCKET_APP_PASSWORD:-}" ]; then
+    echo "  ✅ Bitbucket 凭证已配置"
+elif [ "$QUIET" = true ]; then
+    echo "  ℹ️  /fix 建 PR 需预设 BITBUCKET_USERNAME + BITBUCKET_APP_PASSWORD"
+    echo "     见 config/env.template（App Password: Repositories Read + Pull requests Write）"
+else
+    echo "  /fix 自动创建 Bitbucket PR 需要 App Password（回车可跳过）"
+    echo "  创建: Bitbucket → Personal settings → App passwords"
+    echo "  权限: Repositories Read + Pull requests Write"
+    if [ -z "${BITBUCKET_USERNAME:-}" ]; then
+        current=$(grep "^BITBUCKET_USERNAME=" "$HERMES_ENV" 2>/dev/null | cut -d= -f2- || echo "")
+        if [ -n "$current" ]; then
+            echo "  ✅ BITBUCKET_USERNAME — 已配置"
+        else
+            read -r -p "  BITBUCKET_USERNAME: " val
+            if [ -n "$val" ]; then
+                echo "BITBUCKET_USERNAME=${val}" >> "$HERMES_ENV"
+                echo "  ✅ BITBUCKET_USERNAME — 已保存"
+            fi
+        fi
+    else
+        echo "  ✅ BITBUCKET_USERNAME — 已配置"
+    fi
+    current_pw=$(grep "^BITBUCKET_APP_PASSWORD=" "$HERMES_ENV" 2>/dev/null | cut -d= -f2- || echo "")
+    if [ -n "${BITBUCKET_APP_PASSWORD:-}" ] || [ -n "$current_pw" ]; then
+        echo "  ✅ BITBUCKET_APP_PASSWORD — 已配置"
+    else
+        read -r -s -p "  BITBUCKET_APP_PASSWORD: " val
+        echo ""
+        if [ -n "$val" ]; then
+            echo "BITBUCKET_APP_PASSWORD=${val}" >> "$HERMES_ENV"
+            echo "  ✅ BITBUCKET_APP_PASSWORD — 已保存"
+        else
+            echo "  ⏭️  已跳过 Bitbucket（之后可写入 Hermes .env）"
+        fi
+    fi
+fi
+
+if [ -f "$SCRIPT_DIR/config/repos.json" ]; then
+    echo "  ✅ repos.json 已存在: $SCRIPT_DIR/config/repos.json"
+else
+    echo "  ℹ️  /fix 仓库映射：请复制并编辑本机路径"
+    echo "     cp $SCRIPT_DIR/config/repos.template.json $SCRIPT_DIR/config/repos.json"
+fi
+echo ""
+
+# ============================================================
 # Step 4: Verify Connectivity
 # ============================================================
 echo "━━━ Step 4: 验证 Jira API 连通性 ━━━"
@@ -475,11 +528,11 @@ echo "  ╚═══════════════════════
 echo ""
 echo "  使用方法:"
 echo "    /jira-analyze CG-12345    分析指定 Bug"
-echo "    分析bug CG-12345           同上"
+echo "    /fix 1  或  /fix CG-12345  自动修复并建 PR"
 echo ""
 echo "  Cron 日报创建后将在每天 9:00 自动推送。"
 echo ""
-echo "  💡 HTML 可视化日报需要额外配置 Cloudflare Pages，"
+echo "  💡 HTML 日报 → Cloudflare；/fix PR → Bitbucket + repos.json"
 echo "     详见 README 或 config/env.template"
 echo "  详情参考: $SCRIPT_DIR/README.md"
 echo ""

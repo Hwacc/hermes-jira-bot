@@ -18,5 +18,9 @@ __pycache__/
 *.env
 !*.env.template
 !*.env.example
+
+# Local machine paths for /fix mapping (use repos.template.json)
+config/repos.json
+
 test-install.sh
 .wrangler/

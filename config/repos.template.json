@@ -1,22 +1,29 @@
 {
   "_comment": "Copy to repos.json and fill real paths. repos.json is gitignored (local paths).",
-  "_version_match": "exact → case-insensitive → strip v/V → longest version_lines prefix → else default repo/path + branch_pattern → no fixVersion: default as-is",
-  "_branch_pattern": "{version} = name without leading v/V. Example: v11.12 → dev/11.12.x",
-  "_version_lines": "Prefix → inherit repo/path/workspace. Longest match wins (\"11.\" before \"1.\").",
-  "_overrides_match": "Per-project summary regex overrides: match.summary is checked before version mapping. First match wins.",
+  "_resolve_order": "overrides (array, first match) lock product repo/path → then branch via override/project versions → version_lines → branch_pattern → override/project default",
+  "_overrides_match": "match.summary regex (?i). Prefer PC OVERLAY / CORTEX OVERLAY. Override sets repo/path; branch still follows branch_pattern unless versions/default says otherwise. Escape: /fix KEY overlay",
+  "_version_match": "extract first x.y/.x.y.z from Jira name (e.g. V12.0 Public Release→12.0) → pad to x.y.z (12.0.0) → match versions keys (also padded) → version_lines longest prefix → branch_pattern",
+  "_branch_pattern": "{version} = major.minor only, patch ignored (11.11.0/11.11.2→dev/11.11.x, 11.12→dev/11.12.x). Overlay same.",
+  "_version_lines": "Prefix → inherit repo/path. After an override match, repo/path stay from override; only branch is derived unless override has its own version_lines.",
   "CG": {
     "name": "Cortex PC",
     "provider": "bitbucket",
     "workspace": "razersw",
     "agent": "claude",
-    "overrides": {
-      "overlay": {
-        "match": { "summary": "IN-GAME OVERLAY|OVERLAY" },
+    "overrides": [
+      {
+        "id": "overlay",
+        "match": {
+          "summary": "(?i)\\bPC\\s+OVERLAY\\b|\\bCORTEX\\s+OVERLAY\\b"
+        },
         "repo": "cortex-overlay",
         "path": "C:/workspace/cortex-overlay",
-        "branch": "main"
+        "branch_pattern": "dev/{version}.x",
+        "default": {
+          "branch": "main"
+        }
       }
-    },
+    ],
     "branch_pattern": "dev/{version}.x",
     "version_lines": {
       "11.": {
@@ -29,11 +36,6 @@
       }
     },
     "versions": {
-      "11.11": {
-        "repo": "cortex10-frontend",
-        "path": "C:/workspace/cortex10-frontend",
-        "branch": "dev/11.11.x"
-      },
       "12.0": {
         "repo": "cortex-frontend-vue3",
         "path": "C:/workspace/cortex-frontend-vue3",

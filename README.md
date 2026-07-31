@@ -9,7 +9,8 @@
 |------|---------|------|
 | 📊 **Bug 日报** | Cron（早 9） | 自动推送待办 Bug 汇总，使用 `jira-bug-digest` skill |
 | 🔍 **Bug 分析** | `/jira-analyze CG-xxx` | LLM 分析难度/工时/根因，回帖到 Jira，使用 `jira-analyze` skill |
-| 🧪 **一键安装** | `bash install.sh` | 自动安装双 skill + 配置凭证 |
+| 🔧 **自动修复（PoC）** | `/fix CG-xxx` | 编排层：worktree → Claude/Cursor → push → Bitbucket PR，使用 `jira-fix` skill |
+| 🧪 **一键安装** | `bash install.sh` | 自动安装 skills + 配置凭证 |
 
 ## 📦 安装
 
@@ -60,7 +61,10 @@ JIRA_CLOUD_ID=your-cloud-instance-id
 ```bash
 cp -r skills/jira-analyze ~/.hermes/skills/
 cp -r skills/jira-bug-digest ~/.hermes/skills/
+cp -r skills/jira-fix ~/.hermes/skills/
 ```
+
+`/fix` 另需：本机 `config/repos.json`、Bitbucket App Password（见 `config/env.template`）、已登录的 `claude` CLI。
 
 ## 🚀 使用
 
@@ -81,6 +85,24 @@ cp -r skills/jira-bug-digest ~/.hermes/skills/
 🔍 根因: UI实现与设计稿不一致
 💡 建议: 对照设计稿逐项对比调整CSS
 ❤ 来自 Hwacc 的 Hermes Jira Bot
+```
+
+### 自动修复（编号 + 批量）
+
+```
+/jira-analyze CG-1 CG-2        # 分析并写入编号 session（30 分钟）
+1                              # 或 /fix 1  /fix 1,2
+/fix CG-12345                 # 显式 KEY
+/fix CG-12345 overlay         # 强制 Overlay
+/fix 1 2                      # 批量串行
+```
+
+本地脚本：
+
+```bash
+python skills/jira-fix/scripts/jira_fix.py 1 --resolve-only    # 只解析编号
+python skills/jira-fix/scripts/jira_fix.py CG-12345 --dry-run  # 只看映射
+python skills/jira-fix/scripts/fix_session.py show             # 查看 session
 ```
 
 ### Bug 日报
@@ -104,20 +126,24 @@ hermes-jira-bot/
 ├── install.sh                       # 一键安装脚本
 ├── skills/
 │   ├── jira-analyze/                # Bug 分析 skill
-│   │   ├── SKILL.md
-│   │   └── scripts/
-│   │       ├── jira_analyze.py      # Jira API 客户端
-│   │       └── setup.sh             # 凭证配置向导
-│   └── jira-bug-digest/             # 日报 skill
-│       ├── SKILL.md
-│       └── scripts/
-│           └── fetch_digest.py      # JQL 查询 + 格式化日报
+│   ├── jira-bug-digest/             # 日报 skill
+│   └── jira-fix/                    # /fix 编排（repos 解析 + worktree + PR）
 ├── config/
-│   └── env.template                 # 环境变量模板
+│   ├── env.template                 # 环境变量模板
+│   ├── repos.template.json          # Ticket→仓库映射模板（可提交）
+│   └── repos.json                   # 本机映射（gitignore，从 template 复制）
 └── cron/
     └── jobs.template.json           # Cron job 配置参考
 ```
 
+### Ticket → 仓库映射（Claude Code /fix 用）
+
+```bash
+cp config/repos.template.json config/repos.json
+# 编辑 repos.json：填 path / branch / Bitbucket workspace·repo
+```
+
+按 Jira `project.key` 解析。可用 `overrides[]` 按 summary 正则分流产品（如 Overlay）；再用 `versions` / `version_lines` / `branch_pattern`。详见项目状态笔记。
 ## 🔧 环境变量
 
 | 变量 | 说明 | 获取 |
@@ -129,14 +155,18 @@ hermes-jira-bot/
 | `JIRA_DELIVER` | （可选）日报投递目标，如 `qqbot:<id>`；默认 origin | Hermes `--deliver` |
 | `CLOUDFLARE_API_TOKEN` | （可选）HTML 日报 Pages 部署 | [API Tokens](https://dash.cloudflare.com/profile/api-tokens) |
 | `CLOUDFLARE_ACCOUNT_ID` | （可选）Cloudflare Account ID | Cloudflare Dashboard |
+| `BITBUCKET_USERNAME` | （`/fix`）Bitbucket 用户名 | Bitbucket 账号 |
+| `BITBUCKET_APP_PASSWORD` | （`/fix`）App Password（PR Write） | Bitbucket → App passwords |
 
 ## 🗺️ 路线图
 
 - [x] Bug 分析 + 回帖 (`/jira-analyze`)
 - [x] 待办 Bug 日报 (cron)
 - [x] 一键安装脚本
+- [x] `/fix` 单票编排 PoC（worktree → agent → Bitbucket PR）
+- [x] `/fix` 编号 session（TTL 30m）+ 批量串行
+- [ ] Review Gate
 - [ ] 桌面 TodoList 小组件
-- [ ] Claude Code / Copilot CLI 联动（AI 自动修 Bug）
 
 ## 📄 License
 

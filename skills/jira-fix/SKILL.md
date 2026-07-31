@@ -66,8 +66,8 @@ python "{skillDir}/scripts/jira_fix.py" CG-20926 --dry-run
 
 ## 脚本职责（单票循环）
 
-worktree `fix/<KEY>` → agent → 校验 commit → push → PR → Jira 评论。  
-Review Gate 二期不做。
+worktree `fix/<KEY>` → 下载 Jira 附件到 `.jira-fix-attachments/`（不入 commit）→ agent（**summary 为主**；description 可空）→ 校验 commit（无 commit 时编排层可兜底）→ push → PR → Jira 评论。  
+失败时 JSON 含 `agent_log` 路径。Review Gate 二期不做。
 
 ## 失败时
 

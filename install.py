@@ -338,6 +338,52 @@ def step_3_5_cloudflare():
         print("     权限选 Account → Cloudflare Pages → Edit")
     print("")
 
+# ── Step 3.6: Bitbucket + repos.json（/fix）────────────
+
+def step_3_6_bitbucket():
+    print("━━━ Step 3.6: Bitbucket（/fix 建 PR，可选） ━━━")
+
+    creds = _load_env()
+    bb_user = os.environ.get("BITBUCKET_USERNAME") or creds.get("BITBUCKET_USERNAME", "")
+    bb_pass = os.environ.get("BITBUCKET_APP_PASSWORD") or creds.get("BITBUCKET_APP_PASSWORD", "")
+
+    if bb_user and bb_pass:
+        _ok("Bitbucket 凭证已配置")
+    elif QUIET:
+        print("  ℹ️  /fix 建 PR 需预设 BITBUCKET_USERNAME + BITBUCKET_APP_PASSWORD")
+        print("     见 config/env.template（App Password: Repositories Read + Pull requests Write）")
+    else:
+        print("  /fix 自动创建 Bitbucket PR 需要 App Password（回车可跳过）")
+        print("  创建: Bitbucket → Personal settings → App passwords")
+        print("  权限: Repositories Read + Pull requests Write")
+        if not bb_user:
+            val = input("  BITBUCKET_USERNAME: ").strip()
+            if val:
+                _save_env("BITBUCKET_USERNAME", val)
+                bb_user = val
+                _ok("BITBUCKET_USERNAME — 已保存")
+        else:
+            _ok("BITBUCKET_USERNAME — 已配置")
+        if not bb_pass:
+            val = getpass.getpass("  BITBUCKET_APP_PASSWORD: ").strip()
+            if val:
+                _save_env("BITBUCKET_APP_PASSWORD", val)
+                bb_pass = val
+                _ok("BITBUCKET_APP_PASSWORD — 已保存")
+        else:
+            _ok("BITBUCKET_APP_PASSWORD — 已配置")
+        if not (bb_user and bb_pass):
+            print("  ⏭️  已跳过 Bitbucket（之后可写入 Hermes .env）")
+
+    repos = SCRIPT_DIR / "config" / "repos.json"
+    template = SCRIPT_DIR / "config" / "repos.template.json"
+    if repos.is_file():
+        _ok(f"repos.json 已存在: {repos}")
+    else:
+        print("  ℹ️  /fix 仓库映射：请复制并编辑本机路径")
+        print(f"     cp {template} {repos}")
+    print("")
+
 # ── Step 4: verify ─────────────────────────────────────
 
 def step_4_verify():
@@ -375,11 +421,11 @@ def done():
     print("")
     print("  使用方法:")
     print("    /jira-analyze CG-12345    分析指定 Bug")
-    print("    分析bug CG-12345           同上")
+    print("    /fix 1  或  /fix CG-12345  自动修复并建 PR")
     print("")
     print("  Cron 日报创建后将在每天 9:00 自动推送。")
     print("")
-    print("  💡 HTML 可视化日报需要额外配置 Cloudflare Pages，")
+    print("  💡 HTML 日报 → Cloudflare；/fix PR → Bitbucket + repos.json")
     print("     详见 README 或 config/env.template")
     print(f"  详情参考: {SCRIPT_DIR / 'README.md'}")
     print("")
@@ -393,5 +439,6 @@ if __name__ == "__main__":
     step_2_credentials()
     step_3_cron()
     step_3_5_cloudflare()
+    step_3_6_bitbucket()
     step_4_verify()
     done()
