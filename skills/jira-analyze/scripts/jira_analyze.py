@@ -7,6 +7,7 @@ Requires env vars:
   JIRA_CLOUD_ID      — Jira cloud instance ID (find at https://<site>.atlassian.net/secure/admin/cloudid)
 """
 import json, os, sys, base64, urllib.request, urllib.error
+from pathlib import Path
 
 CLOUD_ID = os.environ.get("JIRA_CLOUD_ID", "")
 
@@ -78,6 +79,24 @@ def post_comment(auth, key, text):
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"HTTP {e.code} posting comment: {e.read().decode()[:300]}")
 
+def _save_fix_session(bugs, session_id="default"):
+    """Persist numbered list for /fix 1,2 (sibling skill jira-fix). Non-fatal on error."""
+    try:
+        skills_root = Path(__file__).resolve().parents[2]
+        fix_scripts = skills_root / "jira-fix" / "scripts"
+        if str(fix_scripts) not in sys.path:
+            sys.path.insert(0, str(fix_scripts))
+        from fix_session import save_session, format_session_hint  # type: ignore
+
+        path = save_session(
+            [{"key": b["key"], "summary": b.get("summary", "")} for b in bugs],
+            session_id=session_id,
+        )
+        return {"path": str(path), "hint": format_session_hint(session_id)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print(json.dumps({"error": "usage: jira_analyze.py KEY1 KEY2 ..."}))
@@ -85,11 +104,17 @@ if __name__ == "__main__":
     auth = get_auth_header()
     # If --post flag is present, also post analysis comments
     do_post = "--post" in sys.argv
+    no_session = "--no-fix-session" in sys.argv
     keys = [a for a in sys.argv[1:] if not a.startswith("--")]
     bugs = [get_issue(auth, k) for k in keys]
+    session_meta = None if no_session else _save_fix_session(bugs)
     if do_post:
-        bugs_json = json.dumps(bugs, ensure_ascii=False, indent=2)
-        # Return with post flag so caller can use it
-        print(json.dumps({"bugs": bugs, "post_ready": True, "auth_ok": True}, ensure_ascii=False, indent=2))
+        out = {"bugs": bugs, "post_ready": True, "auth_ok": True}
+        if session_meta is not None:
+            out["fix_session"] = session_meta
+        print(json.dumps(out, ensure_ascii=False, indent=2))
     else:
-        print(json.dumps(bugs, ensure_ascii=False, indent=2))
+        if session_meta is not None:
+            print(json.dumps({"bugs": bugs, "fix_session": session_meta}, ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps(bugs, ensure_ascii=False, indent=2))

@@ -1,6 +1,6 @@
 ---
 name: jira-analyze
-description: "处理 /jira-analyze 指令——拉取 Jira Bug 详情、LLM 分析难度/工时/根因、生成格式化回复并回帖到 Jira 评论。触发词：/jira-analyze"
+description: "处理 /jira-analyze 指令——拉取 Jira Bug 详情、LLM 分析难度/工时/根因、回帖 Jira，并写入编号 session 供 /fix 1,2 使用。触发词：/jira-analyze"
 triggers:
   - "/jira-analyze"
   - "jira-analyze"
@@ -21,17 +21,23 @@ triggers:
 |------|------|---------|
 | `JIRA_USER_EMAIL` | Atlassian 账号邮箱 | 你的登录邮箱 |
 | `JIRA_API_TOKEN` | API Token（1年有效） | https://id.atlassian.com/manage-profile/security/api-tokens |
-| `JIRA_CLOUD_ID` | Jira Cloud 实例 ID | https://<site>.atlassian.net/secure/admin/cloudid |
+| `JIRA_CLOUD_ID` | Jira Cloud 实例 ID | https://\<site\>.atlassian.net/secure/admin/cloudid |
 
-## Step 1：拉取 Bug 详情
-
-使用 skill 自带的脚本：
+## Step 1：拉取 Bug 详情（并保存编号 session）
 
 ```
 python "{skillDir}/scripts/jira_analyze.py" KEY1 KEY2 KEY3 ...
 ```
 
-输出是 JSON 数组，每个 bug 包含：key, summary, description, priority, status, created, reporter, project, comments。
+脚本会：
+
+1. 拉取每个 Bug 的 JSON  
+2. **默认**写入 fix 编号 session（供随后 `/fix 1` / `1,2`），TTL **30 分钟**  
+3. 输出中带 `fix_session.hint`（若保存成功）
+
+不需要 session 时加 `--no-fix-session`。
+
+输出字段：`bugs` 数组（或旧版纯数组）+ 可选 `fix_session`。
 
 ## Step 2：分析每个 Bug
 
@@ -65,31 +71,24 @@ Content-Type: application/json
 }
 ```
 
-## 回复格式
+## 回复格式（用户侧）
 
-```
-收到 🎯
-⭐ 难度: ★★★☆☆  ⏱ 预计: 2-4h
-🔍 根因: xxx
-💡 建议: xxx
-❤ 来自 {用户名} 的 Hermes Jira Bot
-```
-
-## 认证
-
-Jira 查询和评论回帖均使用 **Jira API Token** (Basic Auth)，通过环境变量注入。Token 有效期 1 年，无需刷新流程。首次使用前运行 `scripts/setup.sh` 引导配置。
-
-## 回复给用户
-
-分析完成后，回复一个简洁的汇总：
+每个 Bug 分析可按原格式回帖 Jira。对用户的汇总**必须带编号**，并提示可 `/fix`：
 
 ```
 ✅ 已完成 N 个 Bug 分析：
-  CG-xxx ⭐★★★☆☆ ⏱2h
-  CG-yyy ⭐★★☆☆☆ ⏱1h
-详情见 Jira 评论
+  1. CG-xxx ⭐★★★☆☆ ⏱2h — 一句话根因
+  2. CG-yyy ⭐★★☆☆☆ ⏱1h — …
+需要修复哪些？回复编号（如 1,2）或 /fix CG-xxx
+（编号 30 分钟内有效）
 ```
+
+若脚本返回了 `fix_session.hint`，可直接附在汇总后。
+
+## 认证
+
+Jira 查询和评论回帖均使用 **Jira API Token** (Basic Auth)。
 
 ## 可移植性
 
-本 skill 所有路径均为相对路径，脚本自带。安装后只需配好 3 个环境变量即可在任何 Hermes 环境使用。
+本 skill 所有路径均为相对路径。编号 session 依赖同级安装的 `jira-fix` skill（`skills/jira-fix/scripts/fix_session.py`）。
