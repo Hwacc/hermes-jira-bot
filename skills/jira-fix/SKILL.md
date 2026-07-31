@@ -1,11 +1,13 @@
 ---
 name: jira-fix
-description: "处理 /fix 与编号选票——解析 session 编号或 KEY，串行调用编排脚本修 Bug 并建 PR。触发：/fix、纯编号如 1,2"
+description: "处理 /fix 与 Bitbucket PR 合入/拒绝反馈——编号修 Bug 建 PR；webhook 合入或 declined 时写 Jira 评论并回复 QQ。触发：/fix、纯编号、bitbucket_pr_fulfilled、bitbucket_pr_rejected"
 triggers:
   - "/fix"
   - "jira-fix"
   - "修复bug"
   - "修 bug"
+  - "bitbucket_pr_fulfilled"
+  - "bitbucket_pr_rejected"
 ---
 
 # Jira Bug 自动修复（编号 + 批量串行）
@@ -72,3 +74,23 @@ worktree `fix/<KEY>` → 下载 Jira 附件到 `.jira-fix-attachments/`（不入
 ## 失败时
 
 不要手动换 Agent 重试（脚本已处理基建回退）。直接转发 `message_qq`。
+
+## Bitbucket PR 合入 / 拒绝（webhook → Hermes）
+
+由薄适配层转发（**不是**适配层写 Jira）。按 `event_type` 执行：
+
+### `bitbucket_pr_fulfilled`（合入）
+
+```
+python "{skillDir}/scripts/pr_lifecycle.py" fulfilled {key} --pr-url "{pr_url}" --pr-id "{pr_id}" --branch "{branch}" --base "{base}" --repo "{repository}" --actor "{merged_by}"
+```
+
+用中文简短回复（可参考 `message_qq`）。不要再改代码、不要再开 PR。
+
+### `bitbucket_pr_rejected`（Declined）
+
+```
+python "{skillDir}/scripts/pr_lifecycle.py" rejected {key} --pr-url "{pr_url}" --pr-id "{pr_id}" --branch "{branch}" --base "{base}" --repo "{repository}" --actor "{declined_by}" --reason "{reason}"
+```
+
+**必须**在 Jira 评论与 QQ 回复中带上 `reason`（若非空）。可参考 `message_qq`。不要自动重修，除非用户明确要求。
