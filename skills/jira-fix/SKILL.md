@@ -81,9 +81,12 @@ python "{skillDir}/scripts/jira_fix.py" CG-20926 --dry-run
 worktree `fix/<KEY>` → 下载 Jira 附件到 `.jira-fix-attachments/`（不入 commit）→ agent（**summary 为主**；description 可空；**禁止**再走 Jira MCP / 向用户索要票详情）→ 校验 commit（无 commit 时编排层可兜底）→ push → PR → Jira 评论。  
 失败时 JSON 含 `agent_log` 路径（日志含完整 prompt）。Review Gate 二期不做。
 
+**Bitbucket PR 韧性：** 建 PR 前先查是否已有 `OPEN` 同源分支 PR（幂等）；超时/断连/5xx 指数退避重试（默认 3 次）。若 **push 已成功** 但 PR 仍失败：`ok=false` + `partial=true` + `pushed=true`，Jira/QQ 发 ⚠️（含分支名与错误），**不要**当成整票修复失败而丢掉远端分支。
+
 ## 失败时
 
-不要手动换 Agent 重试（脚本已处理基建回退）。直接转发 `message_qq`。
+不要手动换 Agent 重试（脚本已处理基建回退）。直接转发 `message_qq`。  
+若见「已 push，PR 失败」：告知用户分支已在远端，可手动建 PR 或稍后重跑 `/fix`（会复用已有 OPEN PR）。
 
 ## Bitbucket PR 合入 / 拒绝（webhook → Hermes）
 

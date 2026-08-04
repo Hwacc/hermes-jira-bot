@@ -26,6 +26,7 @@ import urllib.request
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote
 
 _SCRIPTS = Path(__file__).resolve().parent
 if str(_SCRIPTS) not in sys.path:
@@ -693,7 +694,92 @@ def classify_agent_result(proc: subprocess.CompletedProcess) -> None:
 # ── VCS PR ──────────────────────────────────────────────────────────────────
 
 
-def create_bitbucket_pr(
+def _bitbucket_basic_auth() -> str:
+    user = os.environ.get("BITBUCKET_USERNAME", "")
+    pw = os.environ.get("BITBUCKET_APP_PASSWORD", "")
+    if not user or not pw:
+        raise RuntimeError("BITBUCKET_USERNAME / BITBUCKET_APP_PASSWORD required")
+    return base64.b64encode(f"{user}:{pw}".encode()).decode()
+
+
+def _bitbucket_http(
+    method: str,
+    url: str,
+    *,
+    body: Optional[dict] = None,
+    timeout: int = 60,
+) -> dict:
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method=method,
+        headers={
+            "Authorization": f"Basic {_bitbucket_basic_auth()}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"Bitbucket HTTP {e.code}: {err_body}") from e
+
+
+def _is_transient_bitbucket_error(exc: BaseException) -> bool:
+    if isinstance(exc, (TimeoutError, urllib.error.URLError, ConnectionError, OSError)):
+        return True
+    msg = str(exc).lower()
+    if any(
+        s in msg
+        for s in (
+            "timed out",
+            "timeout",
+            "temporarily unavailable",
+            "connection reset",
+            "connection aborted",
+            "connection refused",
+            "network is unreachable",
+            "broken pipe",
+            "eof occurred",
+            "remote end closed",
+            "10054",  # WinError connection reset
+            "10060",  # WinError timeout
+        )
+    ):
+        return True
+    # HTTP status in our RuntimeError message
+    for code in ("429", "500", "502", "503", "504"):
+        if f"bitbucket http {code}" in msg or f"http {code}" in msg:
+            return True
+    return False
+
+
+def find_open_bitbucket_pr(workspace: str, repo: str, source_branch: str) -> Optional[str]:
+    """Return HTML URL of an OPEN PR from source_branch, if any."""
+    # Bitbucket Cloud query language
+    q = f'source.branch.name="{source_branch}" AND state="OPEN"'
+    url = (
+        f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}/pullrequests"
+        f"?q={quote(q)}&pagelen=5"
+    )
+    data = _bitbucket_http("GET", url, timeout=45)
+    for pr in data.get("values") or []:
+        html = ((pr.get("links") or {}).get("html") or {}).get("href") or ""
+        if html:
+            return html
+        # fallback fields
+        if pr.get("id") is not None:
+            return (
+                f"https://bitbucket.org/{workspace}/{repo}/pull-requests/{pr['id']}"
+            )
+    return None
+
+
+def _create_bitbucket_pr_once(
     workspace: str,
     repo: str,
     title: str,
@@ -701,10 +787,6 @@ def create_bitbucket_pr(
     dest_branch: str,
     description: str,
 ) -> str:
-    user = os.environ.get("BITBUCKET_USERNAME", "")
-    pw = os.environ.get("BITBUCKET_APP_PASSWORD", "")
-    if not user or not pw:
-        raise RuntimeError("BITBUCKET_USERNAME / BITBUCKET_APP_PASSWORD required")
     url = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}/pullrequests"
     payload = {
         "title": title,
@@ -713,24 +795,87 @@ def create_bitbucket_pr(
         "destination": {"branch": {"name": dest_branch}},
         "close_source_branch": False,
     }
-    data = json.dumps(payload).encode()
-    creds = base64.b64encode(f"{user}:{pw}".encode()).decode()
-    req = urllib.request.Request(
-        url,
-        data=data,
-        method="POST",
-        headers={
-            "Authorization": f"Basic {creds}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
+    resp = _bitbucket_http("POST", url, body=payload, timeout=60)
+    return (
+        resp.get("links", {}).get("html", {}).get("href")
+        or resp.get("url")
+        or ""
     )
+
+
+def _try_find_open_bitbucket_pr(
+    workspace: str, repo: str, source_branch: str
+) -> Optional[str]:
+    """Lookup OPEN PR; ignore transient lookup failures so create can still proceed."""
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            resp = json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"Bitbucket PR HTTP {e.code}: {e.read().decode()[:500]}") from e
-    return resp.get("links", {}).get("html", {}).get("href") or resp.get("url") or ""
+        return find_open_bitbucket_pr(workspace, repo, source_branch)
+    except Exception as e:
+        if _is_transient_bitbucket_error(e):
+            return None
+        # Auth / permission errors should surface
+        msg = str(e).lower()
+        if "bitbucket http 401" in msg or "bitbucket http 403" in msg:
+            raise
+        return None
+
+
+def create_bitbucket_pr(
+    workspace: str,
+    repo: str,
+    title: str,
+    source_branch: str,
+    dest_branch: str,
+    description: str,
+    *,
+    retries: int = 3,
+    backoff_sec: float = 1.5,
+) -> str:
+    """Find existing OPEN PR or create one, with retries on transient API errors."""
+    existing = _try_find_open_bitbucket_pr(workspace, repo, source_branch)
+    if existing:
+        return existing
+
+    last_err: Optional[BaseException] = None
+    attempts = max(1, retries)
+    for i in range(attempts):
+        # Another attempt / lost response may have already created the PR
+        existing = _try_find_open_bitbucket_pr(workspace, repo, source_branch)
+        if existing:
+            return existing
+        try:
+            url = _create_bitbucket_pr_once(
+                workspace, repo, title, source_branch, dest_branch, description
+            )
+            if url:
+                return url
+            # empty URL — try find
+            existing = _try_find_open_bitbucket_pr(workspace, repo, source_branch)
+            if existing:
+                return existing
+            raise RuntimeError("Bitbucket PR create returned empty URL")
+        except Exception as e:
+            last_err = e
+            msg = str(e).lower()
+            # Duplicate / already exists → resolve by lookup
+            if "already" in msg or "duplicate" in msg or "bitbucket http 400" in msg:
+                existing = _try_find_open_bitbucket_pr(workspace, repo, source_branch)
+                if existing:
+                    return existing
+            if i + 1 < attempts and _is_transient_bitbucket_error(e):
+                time.sleep(backoff_sec * (2**i))
+                continue
+            if i + 1 < attempts and "bitbucket http 400" in msg:
+                # brief retry then give up (race / validation)
+                time.sleep(backoff_sec)
+                continue
+            break
+
+    existing = _try_find_open_bitbucket_pr(workspace, repo, source_branch)
+    if existing:
+        return existing
+    raise RuntimeError(
+        f"Bitbucket PR failed after {attempts} attempt(s): {last_err}"
+    ) from last_err
 
 
 def create_github_pr(
@@ -1033,27 +1178,52 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
             f"Agent: {used_agent}\n"
             f"Base: `{target.branch}`\n"
         )
+        pr_error = ""
         if not args.no_pr:
-            if target.provider == "github":
-                # workspace may be owner; repo is name → owner/name
-                slug = target.repo if "/" in target.repo else f"{target.workspace}/{target.repo}"
-                pr_url = create_github_pr(slug, title, fix_branch, target.branch, desc)
-            else:
-                pr_url = create_bitbucket_pr(
-                    target.workspace,
-                    target.repo,
-                    title,
-                    fix_branch,
-                    target.branch,
-                    desc,
-                )
+            try:
+                if target.provider == "github":
+                    # workspace may be owner; repo is name → owner/name
+                    slug = (
+                        target.repo
+                        if "/" in target.repo
+                        else f"{target.workspace}/{target.repo}"
+                    )
+                    pr_url = create_github_pr(
+                        slug, title, fix_branch, target.branch, desc
+                    )
+                else:
+                    pr_url = create_bitbucket_pr(
+                        target.workspace,
+                        target.repo,
+                        title,
+                        fix_branch,
+                        target.branch,
+                        desc,
+                    )
+            except Exception as e:
+                # Push already succeeded — do not treat as full fix failure
+                pr_error = str(e)
 
-        jira_msg = (
-            f"✅ 已自动修复 → PR: {pr_url or '(no PR)'}\n"
-            f"分支: {fix_branch} → {target.branch}\n"
-            f"Agent: {used_agent}"
-        )
-        qq_msg = f"✅ {key} 已修复 → {pr_url or fix_branch}"
+        if pr_error:
+            jira_msg = (
+                f"⚠️ 代码已推送，但 PR 创建失败\n"
+                f"分支: `{fix_branch}` → `{target.branch}`\n"
+                f"（远端已有 commit，可手动建 PR 或重跑 /fix）\n"
+                f"错误: {pr_error}\n"
+                f"Agent: {used_agent}"
+            )
+            qq_msg = (
+                f"⚠️ {key} 已 push，PR 失败\n"
+                f"分支 {fix_branch} → {target.branch}\n"
+                f"{pr_error}"
+            )
+        else:
+            jira_msg = (
+                f"✅ 已自动修复 → PR: {pr_url or '(no PR)'}\n"
+                f"分支: {fix_branch} → {target.branch}\n"
+                f"Agent: {used_agent}"
+            )
+            qq_msg = f"✅ {key} 已修复 → {pr_url or fix_branch}"
 
         if not args.no_jira_comment:
             try:
@@ -1061,12 +1231,18 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
             except Exception as e:
                 qq_msg += f"\n⚠️ Jira 评论失败: {e}"
 
+        # Push succeeded: keep local branch cleanup soft (delete_branch=False)
         success = True
         return {
-            "ok": True,
+            "ok": not bool(pr_error),
+            "partial": bool(pr_error),
+            "pushed": True,
             "key": key,
             "agent": used_agent,
             "pr_url": pr_url,
+            "pr_error": pr_error or None,
+            "fix_branch": fix_branch,
+            "base_branch": target.branch,
             "validate": validate_info,
             "resolve": asdict(target),
             "declined": declined,
