@@ -514,6 +514,12 @@ def build_prompt(
     lines = [
         f"Fix Bug {key}",
         "",
+        "IMPORTANT — ticket context is ALREADY provided below by the orchestrator:",
+        "- Do NOT call Jira / Atlassian MCP (or any remote ticket API).",
+        "- Do NOT ask the user to paste Summary/Description/steps.",
+        "- Do NOT refuse for lack of MCP or ticket access — use the fields below only.",
+        "- If Description is empty, fix from Summary (+ attachments if listed).",
+        "",
         f"Summary (primary source of truth): {summary}",
         "",
     ]
@@ -557,6 +563,7 @@ def build_prompt(
         "- Make a minimal code fix for the bug described by the Summary (and attachments if any).",
         f"- After editing, you MUST run git add and git commit; message MUST include {key}.",
         "- Leaving only uncommitted edits is a FAILURE. Commit before you finish.",
+        "- Asking for ticket details or stopping without a commit is a FAILURE.",
         "- Do NOT push, do NOT open a pull request, do NOT rename the branch.",
         "- Do not modify unrelated files.",
         "",
@@ -564,16 +571,67 @@ def build_prompt(
     return "\n".join(lines)
 
 
-def save_agent_log(key: str, proc: subprocess.CompletedProcess, agent: str) -> str:
+def extract_agent_result_text(proc: Optional[subprocess.CompletedProcess]) -> str:
+    """Best-effort extract human-readable agent reply from CLI stdout/stderr."""
+    if proc is None:
+        return ""
+    raw = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+    if not raw:
+        return ""
+    # Claude / Cursor often emit a final JSON object with "result"
+    for line in reversed(raw.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            for key in ("result", "message", "text", "content"):
+                val = obj.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+    return raw[:2000]
+
+
+_ASKING_FOR_TICKET_RE = re.compile(
+    r"(paste the .{0,60}ticket|share the .{0,60}ticket|"
+    r"no way to pull the ticket|ticket details\??|"
+    r"Jira/Atlassian MCP|Atlassian MCP|"
+    r"Could you (share|paste).{0,100}(Summary|ticket|Description))",
+    re.I,
+)
+
+
+def agent_asked_for_ticket_details(text: str) -> bool:
+    return bool(text and _ASKING_FOR_TICKET_RE.search(text))
+
+
+def save_agent_log(
+    key: str,
+    proc: subprocess.CompletedProcess,
+    agent: str,
+    prompt: str = "",
+) -> str:
     log_dir = Path(tempfile.gettempdir()) / "jira-fix-agent-logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     path = log_dir / f"{key}-{agent}-{int(time.time())}.log"
-    path.write_text(
-        f"agent={agent}\nreturncode={proc.returncode}\n\n--- stdout ---\n"
-        f"{proc.stdout or ''}\n\n--- stderr ---\n{proc.stderr or ''}\n",
-        encoding="utf-8",
-        errors="replace",
-    )
+    parts = [
+        f"agent={agent}",
+        f"returncode={proc.returncode}",
+        "",
+        "--- prompt ---",
+        prompt or "(empty)",
+        "",
+        "--- stdout ---",
+        proc.stdout or "",
+        "",
+        "--- stderr ---",
+        proc.stderr or "",
+        "",
+    ]
+    path.write_text("\n".join(parts), encoding="utf-8", errors="replace")
     return str(path)
 
 
@@ -907,6 +965,7 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
     validate_info: dict = {}
     agent_log = ""
     local_atts: list[dict] = []
+    agent_proc: Optional[subprocess.CompletedProcess] = None
 
     try:
         wt_path, base_ref = prepare_worktree(repo, key, target.branch, wt_root)
@@ -915,18 +974,35 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
 
         if not args.skip_agent:
             try:
-                used_agent, proc = run_agent(target.agent, wt_path, prompt, args.timeout)
-                agent_log = save_agent_log(key, proc, used_agent)
-                classify_agent_result(proc)
+                used_agent, agent_proc = run_agent(target.agent, wt_path, prompt, args.timeout)
+                agent_log = save_agent_log(key, agent_proc, used_agent, prompt=prompt)
+                classify_agent_result(agent_proc)
             except InfraFailure:
                 if target.agent != "claude":
                     raise
-                used_agent, proc = run_agent("cursor", wt_path, prompt, args.timeout)
-                agent_log = save_agent_log(key, proc, used_agent)
-                classify_agent_result(proc)
+                used_agent, agent_proc = run_agent("cursor", wt_path, prompt, args.timeout)
+                agent_log = save_agent_log(key, agent_proc, used_agent, prompt=prompt)
+                classify_agent_result(agent_proc)
+
+            reply = extract_agent_result_text(agent_proc)
+            if agent_asked_for_ticket_details(reply):
+                raise BusinessFailure(
+                    "agent asked for ticket details / tried Jira MCP instead of using "
+                    "the Summary/Description already in the prompt. "
+                    f"Agent reply (truncated): {reply[:500]}"
+                )
 
         auto_commit = ensure_commit_after_agent(wt_path, key, base_ref)
-        validate_info = validate_commit(wt_path, key, base_ref)
+        try:
+            validate_info = validate_commit(wt_path, key, base_ref)
+        except BusinessFailure as e:
+            if "no new commits" in str(e).lower():
+                reply = extract_agent_result_text(agent_proc)
+                extra = f" Agent reply (truncated): {reply[:500]}" if reply else ""
+                raise BusinessFailure(
+                    f"{e}. Agent finished without a code commit.{extra}"
+                ) from e
+            raise
         if auto_commit:
             validate_info["orchestrator_commit"] = auto_commit
         run_gate_cmd(wt_path, "lint", target.lint or "")
