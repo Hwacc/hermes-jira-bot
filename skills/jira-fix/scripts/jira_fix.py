@@ -731,6 +731,14 @@ def parse_review_verdict(text: str) -> dict:
         r"\bgood to merge\b",
         r"\bapproved\b",
         r"\baccept(?:s|ed)?\s+(?:the\s+)?fix\b",
+        # Chinese prose patterns (agents often answer in Chinese)
+        r"审查通过",
+        r"通过审查",
+        r"建议合入",
+        r"可以合入",
+        r"修复正确",
+        r"修复有效",
+        r"verdict\s*[::：]?\s*通过",
     ]
     patterns_fail = [
         r"\bverdict\s*[::：]?\s*fail\b",
@@ -738,6 +746,16 @@ def parse_review_verdict(text: str) -> dict:
         r"\bdoes not (?:fix|address)\b",
         r"\bdo not merge\b",
         r"\breject(?:s|ed)?\b",
+        # Chinese prose patterns
+        r"审查结论[^\n]*fail",
+        r"审查结论[^\n]*不通过",
+        r"审查不通过",
+        r"不建议合入",
+        r"不能合入",
+        r"不要[^\n]*合入",
+        r"未对准根因",
+        r"修复无效",
+        r"修复不对",
     ]
     for p in patterns_pass:
         if re.search(p, low):
