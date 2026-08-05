@@ -30,7 +30,7 @@ triggers:
   - 默认也可写在 `repos.json`：`"models": { "claude": "sonnet", "cursor": "grok" }`  
   - 基建回退 claude→cursor 时：**忽略**本次 claude model，改用 `models.cursor`，未配置则 grok
 - **Review Gate（可选）**：Fix 合规 + lint/test 后、push 前交叉审查  
-  - `repos.json`：`"review": { "enabled": true, "agent": "claude", "model": "opus", "timeout_minutes": 10, "on_infra_fail": "reject" }`  
+  - `repos.json`：`"review": { "enabled": true, "agent": "claude", "model": "opus", "timeout_minutes": 20, "on_infra_fail": "reject" }`（本机可改用 cursor/grok 等）  
   - 未配置或 `enabled: false` → 关；override 可覆盖 project  
   - 单次覆盖：`--review` / `--no-review`，或 NL「需要审查」「跳过审查」  
   - Review 上下文：Summary + Description（截断同 Fix）+ **image 附件** + diff；只审不改  
@@ -46,7 +46,7 @@ triggers:
 | `JIRA_USER_EMAIL` / `JIRA_API_TOKEN` / `JIRA_CLOUD_ID` | 读票 + 评论 |
 | `BITBUCKET_USERNAME` / `BITBUCKET_APP_PASSWORD` | Bitbucket 建 PR |
 | 本机仓库根目录 `config/repos.json` | 从 template 复制 |
-| `claude` CLI | 默认 Agent；基建失败回退 Cursor |
+| `claude` CLI | 默认 Agent；基建失败回退 Cursor。编排层用 `--strict-mcp-config` + `--disallowedTools mcp__*` **禁用 MCP**（含 Atlassian/Jira），避免 Fix 去查票 |
 | `agent` / Cursor Agent CLI | 用户指定 `cursor` 时需要 |
 
 ## 交互（必须遵守）

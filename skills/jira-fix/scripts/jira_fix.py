@@ -718,6 +718,38 @@ def parse_review_verdict(text: str) -> dict:
             obj["verdict"] = verdict
             return obj
 
+    # Prose fallback: agents sometimes answer in markdown prose instead of JSON.
+    # Recognize clear PASS/FAIL verdict lines; anything ambiguous stays infra-fail
+    # (caller decides reject/skip) so we never guess on uncertain reviews.
+    low = raw.lower()
+    pass_hits = 0
+    fail_hits = 0
+    patterns_pass = [
+        r"\bverdict\s*[::：]?\s*pass\b",
+        r"\bverdict\s*[::：]?\s*the fix is correct\b",
+        r"\bfix is correct and addresses\b",
+        r"\bgood to merge\b",
+        r"\bapproved\b",
+        r"\baccept(?:s|ed)?\s+(?:the\s+)?fix\b",
+    ]
+    patterns_fail = [
+        r"\bverdict\s*[::：]?\s*fail\b",
+        r"\bfix(?:es)?\s+(?:is|are)?\s+wrong\b",
+        r"\bdoes not (?:fix|address)\b",
+        r"\bdo not merge\b",
+        r"\breject(?:s|ed)?\b",
+    ]
+    for p in patterns_pass:
+        if re.search(p, low):
+            pass_hits += 1
+    for p in patterns_fail:
+        if re.search(p, low):
+            fail_hits += 1
+    if fail_hits and not pass_hits:
+        return {"verdict": "FAIL", "summary": raw[:200], "reasons": [raw[:300]], "risks": [], "suggestions": []}
+    if pass_hits and not fail_hits:
+        return {"verdict": "PASS", "summary": raw[:200], "reasons": [], "risks": [], "suggestions": []}
+
     raise InfraFailure(
         f"Review Gate output missing valid verdict JSON"
         + (f" ({last_err})" if last_err else "")
@@ -925,6 +957,13 @@ def resolve_model_id(
 def run_claude(
     wt: Path, prompt: str, timeout: int, model: Optional[str] = None
 ) -> subprocess.CompletedProcess:
+    """Run Claude Code for Fix/Review.
+
+    MCP is hard-disabled: prompt bans alone do not stop Atlassian/Jira MCP
+    (plugin may still load). --strict-mcp-config with no --mcp-config loads
+    zero servers; --disallowedTools mcp__* denies any that slip through.
+    Avoid --bare here — it can break OAuth/keychain auth used by this bot.
+    """
     exe = which_agent("claude")
     if not exe:
         raise InfraFailure("claude CLI not found on PATH")
@@ -936,6 +975,10 @@ def run_claude(
         str(wt),
         "--permission-mode",
         "bypassPermissions",
+        # Unload user/project/plugin MCP (incl. Atlassian Rovo); do not pass --mcp-config
+        "--strict-mcp-config",
+        "--disallowedTools",
+        "mcp__*",
         "--output-format",
         "json",
     ]

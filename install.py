@@ -441,7 +441,7 @@ def step_3_6_bitbucket():
             print(
                 '     示例: "models": {"claude":"sonnet","cursor":"grok"}, '
                 '"review": {"enabled":true,"agent":"claude","model":"opus",'
-                '"timeout_minutes":10,"on_infra_fail":"reject"}'
+                '"timeout_minutes":20,"on_infra_fail":"reject"}'
             )
     elif template.is_file():
         if QUIET:

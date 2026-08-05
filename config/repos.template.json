@@ -20,7 +20,7 @@
       "enabled": true,
       "agent": "claude",
       "model": "opus",
-      "timeout_minutes": 10,
+      "timeout_minutes": 20,
       "on_infra_fail": "reject"
     },
     "overrides": [

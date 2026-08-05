@@ -34,7 +34,7 @@ class ReviewConfig:
     enabled: bool = False
     agent: str = "claude"
     model: Optional[str] = None  # alias or full id; resolved by orchestrator
-    timeout_minutes: int = 10
+    timeout_minutes: int = 20
     on_infra_fail: str = "reject"  # reject | skip
 
 
@@ -59,7 +59,7 @@ def merge_review_config(
         agent = "claude"
 
     try:
-        timeout = int(raw.get("timeout_minutes") or 10)
+        timeout = int(raw.get("timeout_minutes") or 20)
     except (TypeError, ValueError):
         timeout = 10
     if timeout < 1:
