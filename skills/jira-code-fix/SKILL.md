@@ -48,7 +48,7 @@ User: /fix CG-xxxx
 | Timeout | 30 minutes per ticket, kill + fail on timeout |
 | Batch | Strict serial, single ticket at a time |
 | Session TTL | 30 min for numbered references from /jira-analyze |
-| Review Gate | Phase 2; PoC creates PR directly after fix passes validation |
+| Review Gate | Optional via `repos.json` `review`; after lint/test, before push; PASS required for PR |
 | Agent fallback | Default `claude`; only infrastructure failure → fallback to `cursor` |
 
 ## Headless Agent Invocation

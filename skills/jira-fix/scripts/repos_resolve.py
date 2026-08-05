@@ -25,6 +25,59 @@ class VersionNorm:
 
 
 @dataclass
+class ReviewConfig:
+    """Review Gate prefs from repos.json (project + override merge).
+
+    Missing / empty review block → enabled=False (gate off).
+    """
+
+    enabled: bool = False
+    agent: str = "claude"
+    model: Optional[str] = None  # alias or full id; resolved by orchestrator
+    timeout_minutes: int = 10
+    on_infra_fail: str = "reject"  # reject | skip
+
+
+def merge_review_config(
+    project: dict, override: Optional[dict] = None
+) -> ReviewConfig:
+    """Shallow-merge project.review ← override.review. Absent → disabled."""
+    raw: dict[str, Any] = {}
+    if isinstance(project.get("review"), dict):
+        raw.update(project["review"])
+    if override and isinstance(override.get("review"), dict):
+        raw.update(override["review"])
+    if not raw:
+        return ReviewConfig()
+
+    on_infra = str(raw.get("on_infra_fail") or "reject").strip().lower()
+    if on_infra not in ("reject", "skip"):
+        on_infra = "reject"
+
+    agent = str(raw.get("agent") or "claude").strip().lower()
+    if agent not in ("claude", "cursor"):
+        agent = "claude"
+
+    try:
+        timeout = int(raw.get("timeout_minutes") or 10)
+    except (TypeError, ValueError):
+        timeout = 10
+    if timeout < 1:
+        timeout = 1
+
+    model = raw.get("model")
+    model_s = str(model).strip() if model else None
+
+    return ReviewConfig(
+        enabled=bool(raw.get("enabled", False)),
+        agent=agent,
+        model=model_s or None,
+        timeout_minutes=timeout,
+        on_infra_fail=on_infra,
+    )
+
+
+@dataclass
 class ResolveResult:
     project_key: str
     product_id: str
@@ -42,6 +95,7 @@ class ResolveResult:
     matched_via: str = ""
     # Per-agent model prefs from repos.json, e.g. {"claude": "sonnet", "cursor": "grok"}
     models: dict = field(default_factory=dict)
+    review: ReviewConfig = field(default_factory=ReviewConfig)
 
 
 def strip_leading_v(version: str) -> str:
@@ -298,6 +352,8 @@ def resolve(
     if not models and isinstance(project.get("models"), dict):
         models = dict(project["models"])
 
+    review = merge_review_config(project, override)
+
     return ResolveResult(
         project_key=project_key,
         product_id=product_id,
@@ -314,6 +370,7 @@ def resolve(
         test=fields.get("test"),
         matched_via=matched_via,
         models={str(k): str(v) for k, v in models.items() if v},
+        review=review,
     )
 
 

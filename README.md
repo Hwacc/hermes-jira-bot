@@ -1,7 +1,7 @@
 # 🧭 Hermes Jira Bot
 
 > 基于 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 的 Jira 自动化助手。  
-> **v1.1.0** — Bug 日报 / 分析 / `/fix` PR，以及 Bitbucket **merged + declined** Webhook 闭环（Jira 评论 + QQ）。
+> **v1.2.0** — `/fix` 可选 Model + **Review Gate**（`repos.json` 可配；PASS 后才 push/PR）；含日报 / 分析 / Bitbucket Webhook 闭环。
 
 ## ✨ 功能
 
@@ -9,7 +9,7 @@
 |------|---------|------|
 | 📊 **Bug 日报** | Cron（早 9） | 自动推送待办 Bug 汇总，使用 `jira-bug-digest` skill |
 | 🔍 **Bug 分析** | `/jira-analyze CG-xxx` | LLM 分析难度/工时/根因，回帖到 Jira，使用 `jira-analyze` skill |
-| 🔧 **自动修复（PoC）** | `/fix CG-xxx` | 编排层：worktree → Claude/Cursor → push → Bitbucket PR，使用 `jira-fix` skill |
+| 🔧 **自动修复** | `/fix CG-xxx` | worktree → Fix Agent（可选 model）→ 可选 Review Gate → push → Bitbucket PR |
 | 🔁 **PR 合入/拒绝反馈** | Bitbucket Webhook | Tunnel → 适配层 → Hermes：`fulfilled` / `rejected` → Jira 评论 + QQ（不做 approve） |
 | 🧪 **一键安装** | `bash install.sh` | 自动安装 skills + 配置凭证 |
 
@@ -196,7 +196,7 @@ cp config/repos.template.json config/repos.json
 - [x] Bitbucket `fulfilled` → 适配层转发 Hermes → Jira 评论 + QQ
 - [x] Bitbucket `rejected`（Declined，含 reason）→ 同上
 - [x] ~~Webhook：approve~~（不做：与 merged 反馈重复）
-- [ ] Review Gate
+- [x] Review Gate（`repos.json` review + `--review`/`--no-review`；PASS 后才 push/PR）
 - [ ] 桌面 TodoList 小组件
 
 ## 📄 License

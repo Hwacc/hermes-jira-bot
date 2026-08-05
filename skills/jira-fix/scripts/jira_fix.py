@@ -34,6 +34,7 @@ if str(_SCRIPTS) not in sys.path:
 
 from repos_resolve import (  # noqa: E402
     ResolveResult,
+    ReviewConfig,
     load_repos,
     project_key_from_issue,
     resolve,
@@ -70,6 +71,10 @@ CURSOR_MODEL_ALIASES = {
 }
 CURSOR_DEFAULT_MODEL = CURSOR_MODEL_ALIASES["grok"]
 ALL_MODEL_ALIASES = frozenset(CLAUDE_MODEL_ALIASES) | frozenset(CURSOR_MODEL_ALIASES)
+
+# Shared with Fix + Review prompts
+MAX_DESC_CHARS = 12000
+MAX_DIFF_CHARS = 80000
 
 
 class InfraFailure(Exception):
@@ -513,6 +518,24 @@ def run_gate_cmd(wt: Path, label: str, cmd: str) -> None:
 # ── agents ──────────────────────────────────────────────────────────────────
 
 
+def truncate_description(desc: str, limit: int = MAX_DESC_CHARS) -> str:
+    text = (desc or "").strip()
+    if len(text) > limit:
+        return text[:limit] + "\n…(truncated)"
+    return text
+
+
+def is_image_attachment(att: dict) -> bool:
+    mime = (att.get("mime") or "").lower()
+    path = att.get("path") or att.get("filename") or ""
+    suf = Path(path).suffix.lower()
+    return mime.startswith("image/") or suf in IMAGE_SUFFIXES
+
+
+def image_attachments(local_attachments: Optional[list[dict]]) -> list[dict]:
+    return [a for a in (local_attachments or []) if a.get("path") and is_image_attachment(a)]
+
+
 def build_prompt(
     issue: dict,
     local_attachments: Optional[list[dict]] = None,
@@ -521,9 +544,7 @@ def build_prompt(
     """Build Fix Agent prompt. Summary is authoritative when description is empty."""
     key = issue["key"]
     summary = (issue.get("summary") or "").strip()
-    desc = (issue.get("description") or "").strip()
-    if len(desc) > 12000:
-        desc = desc[:12000] + "\n…(truncated)"
+    desc = truncate_description(issue.get("description") or "")
 
     lines = [
         f"Fix Bug {key}",
@@ -583,6 +604,190 @@ def build_prompt(
         "",
     ]
     return "\n".join(lines)
+
+
+def build_review_prompt(
+    issue: dict,
+    wt: Path,
+    base_ref: str,
+    local_attachments: Optional[list[dict]] = None,
+) -> str:
+    """Build Review Gate prompt: ticket context + image attachments + diff."""
+    key = issue["key"]
+    summary = (issue.get("summary") or "").strip()
+    desc = truncate_description(issue.get("description") or "")
+
+    try:
+        diff = git(wt, "diff", f"{base_ref}...HEAD")
+    except Exception:
+        diff = ""
+    if len(diff) > MAX_DIFF_CHARS:
+        diff = diff[:MAX_DIFF_CHARS] + "\n…(diff truncated)"
+
+    try:
+        commits = git(wt, "log", f"{base_ref}..HEAD", "--pretty=%h %s")
+    except Exception:
+        commits = ""
+    try:
+        names = git(wt, "diff", f"{base_ref}...HEAD", "--name-only")
+    except Exception:
+        names = ""
+
+    lines = [
+        f"Review the automated fix for Bug {key}.",
+        "",
+        "You are a REVIEWER only:",
+        "- Do NOT edit files, git commit, push, or open a pull request.",
+        "- Do NOT call Jira / Atlassian MCP (or any remote ticket API).",
+        "- Do NOT ask the user for ticket details — use the fields and diff below.",
+        "- Judge whether the diff reasonably fixes the bug with minimal unrelated changes.",
+        "",
+        f"Summary: {summary}",
+        "",
+    ]
+    if desc:
+        lines += ["Description:", desc, ""]
+    else:
+        lines += ["Description: (empty in Jira)", ""]
+
+    imgs = image_attachments(local_attachments)
+    if imgs:
+        lines.append("Image attachments in this worktree (open/view if relevant):")
+        for a in imgs:
+            mime = a.get("mime") or ""
+            lines.append(f"- {a['path']}" + (f" ({mime})" if mime else ""))
+        lines.append(
+            f"Do NOT git-add or commit anything under {ATTACHMENT_DIR}/; reference only."
+        )
+        lines.append("")
+
+    lines += [
+        "Changed files:",
+        names.strip() or "(none)",
+        "",
+        "Commits:",
+        commits.strip() or "(none)",
+        "",
+        "Diff:",
+        diff.strip() or "(empty diff)",
+        "",
+        "Respond with ONLY a single JSON object (no markdown fence) of this shape:",
+        '{"verdict":"PASS"|"FAIL","summary":"one-line","reasons":["..."],'
+        '"risks":[],"suggestions":[]}',
+        "- PASS: diff addresses the bug; changes look minimal and safe enough for a PR.",
+        "- FAIL: wrong/incomplete fix, dangerous change, or too much unrelated churn.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def parse_review_verdict(text: str) -> dict:
+    """Extract Review JSON with verdict PASS|FAIL from agent output."""
+    raw = (text or "").strip()
+    if not raw:
+        raise InfraFailure("Review Gate returned empty output")
+
+    candidates: list[str] = []
+    # Fenced ```json ... ```
+    for m in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.S | re.I):
+        candidates.append(m.group(1))
+    # Whole text / last JSON object
+    if raw.startswith("{"):
+        candidates.append(raw)
+    # Scan for balanced {...} containing "verdict"
+    for m in re.finditer(r"\{[^{}]*\"verdict\"[^{}]*\}", raw, re.S | re.I):
+        candidates.append(m.group(0))
+    # Broader nested attempt: last { to last }
+    if "{" in raw and "}" in raw:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if end > start:
+            candidates.append(raw[start : end + 1])
+
+    last_err: Optional[Exception] = None
+    for cand in candidates:
+        try:
+            obj = json.loads(cand)
+        except json.JSONDecodeError as e:
+            last_err = e
+            continue
+        if not isinstance(obj, dict):
+            continue
+        verdict = str(obj.get("verdict") or "").strip().upper()
+        if verdict in ("PASS", "FAIL"):
+            obj["verdict"] = verdict
+            return obj
+
+    raise InfraFailure(
+        f"Review Gate output missing valid verdict JSON"
+        + (f" ({last_err})" if last_err else "")
+        + f": {raw[:500]}"
+    )
+
+
+def run_review_gate(
+    *,
+    cfg: ReviewConfig,
+    issue: dict,
+    wt: Path,
+    base_ref: str,
+    local_attachments: Optional[list[dict]],
+) -> dict:
+    """Run Review Gate. Returns result dict; raises on FAIL / rejectable infra."""
+    if not cfg.enabled:
+        return {"enabled": False, "skipped": True}
+
+    review_model = resolve_model_id(
+        cfg.agent, cli_model=cfg.model, models_cfg={}
+    )
+    timeout = int(cfg.timeout_minutes) * 60
+    prompt = build_review_prompt(issue, wt, base_ref, local_attachments)
+    key = issue["key"]
+    review_log = ""
+
+    try:
+        used_agent, proc = run_agent(
+            cfg.agent, wt, prompt, timeout, model=review_model
+        )
+        review_log = save_agent_log(
+            key,
+            proc,
+            f"review-{used_agent}",
+            prompt=prompt,
+            model=review_model,
+        )
+        classify_agent_result(proc)
+        text = extract_agent_result_text(proc)
+        # Prefer parsing full stdout for JSON (result field may be prose)
+        raw_out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+        try:
+            verdict_obj = parse_review_verdict(raw_out or text)
+        except InfraFailure:
+            verdict_obj = parse_review_verdict(text)
+    except (InfraFailure, BusinessFailure, RuntimeError, ValueError, OSError) as e:
+        return {
+            "enabled": True,
+            "skipped": True,
+            "infra_fail": True,
+            "on_infra_fail": cfg.on_infra_fail,
+            "error": str(e),
+            "agent": cfg.agent,
+            "model": review_model,
+            "review_log": review_log,
+        }
+
+    return {
+        "enabled": True,
+        "skipped": False,
+        "verdict": verdict_obj["verdict"],
+        "summary": verdict_obj.get("summary") or "",
+        "reasons": verdict_obj.get("reasons") or [],
+        "risks": verdict_obj.get("risks") or [],
+        "suggestions": verdict_obj.get("suggestions") or [],
+        "agent": used_agent,
+        "model": review_model,
+        "review_log": review_log,
+    }
 
 
 def extract_agent_result_text(proc: Optional[subprocess.CompletedProcess]) -> str:
@@ -1062,14 +1267,32 @@ def normalize_model_token(token: str) -> Optional[str]:
     return s if s in ALL_MODEL_ALIASES else None
 
 
+def normalize_review_token(token: str) -> Optional[bool]:
+    """Recognize Review Gate toggles: 需要审查 / 跳过审查 / --review / --no-review."""
+    raw = (token or "").strip()
+    if not raw:
+        return None
+    if raw in ("需要审查", "要审查"):
+        return True
+    if raw in ("跳过审查", "不审查", "无需审查"):
+        return False
+    s = raw.lower().replace("_", "-")
+    s = re.sub(r"^--", "", s)
+    if s in ("review", "with-review"):
+        return True
+    if s in ("no-review", "noreview", "skip-review"):
+        return False
+    return None
+
+
 def parse_fix_targets(
     tokens: list[str],
     *,
     session_id: str = DEFAULT_SESSION,
     product_cli: Optional[str] = None,
     repos: Optional[str] = None,
-) -> tuple[list[str], Optional[str], Optional[str], Optional[str]]:
-    """Parse KEY / numbers / trailing product / agent / model → (keys, product, agent, model)."""
+) -> tuple[list[str], Optional[str], Optional[str], Optional[str], Optional[bool]]:
+    """Parse targets → (keys, product, agent, model, review_override)."""
     flat: list[str] = []
     for tok in tokens:
         for part in re.split(r"[\s,]+", tok.strip()):
@@ -1080,6 +1303,7 @@ def parse_fix_targets(
 
     agent: Optional[str] = None
     model: Optional[str] = None
+    review_override: Optional[bool] = None
     kept: list[str] = []
     for t in flat:
         a = normalize_agent_token(t)
@@ -1090,10 +1314,14 @@ def parse_fix_targets(
         if m:
             model = m
             continue
+        rev = normalize_review_token(t)
+        if rev is not None:
+            review_override = rev
+            continue
         kept.append(t)
     flat = kept
     if not flat:
-        raise ValueError("no issue keys; only agent/model token was provided")
+        raise ValueError("no issue keys; only agent/model/review token was provided")
 
     product = product_cli
     products = known_product_ids(Path(repos) if repos else None)
@@ -1116,8 +1344,9 @@ def parse_fix_targets(
         else:
             raise ValueError(
                 f"unrecognized target {t!r}; expected KEY (CG-123), session number, "
-                f"product id, agent (cursor/claude), or model "
-                f"(opus/sonnet/fable/composer/grok)"
+                f"product id, agent (cursor/claude), model "
+                f"(opus/sonnet/fable/composer/grok), or review toggle "
+                f"(需要审查/跳过审查)"
             )
 
     if numbers:
@@ -1132,7 +1361,7 @@ def parse_fix_targets(
             ordered.append(k)
     if not ordered:
         raise ValueError("no issue keys resolved")
-    return ordered, product, agent, model
+    return ordered, product, agent, model, review_override
 
 
 def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> dict:
@@ -1167,6 +1396,13 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
     if args.agent:
         target.agent = args.agent
 
+    # CLI/NL Review Gate override (Optional[bool]); None → repos.json
+    review_override = getattr(args, "review_override", None)
+    if review_override is True:
+        target.review.enabled = True
+    elif review_override is False:
+        target.review.enabled = False
+
     cli_model = getattr(args, "model", None)
     used_model = resolve_model_id(
         target.agent, cli_model=cli_model, models_cfg=target.models
@@ -1183,6 +1419,12 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
         warnings.append(f"declined_lookup_failed: {declined_err}")
     elif declined:
         warnings.append("previous_pr_declined: injecting reason into Fix Agent prompt")
+    if target.review.enabled:
+        warnings.append(
+            f"review_gate: on agent={target.review.agent} "
+            f"model={target.review.model or '(default)'} "
+            f"on_infra_fail={target.review.on_infra_fail}"
+        )
 
     plan = {
         "key": key,
@@ -1199,6 +1441,7 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
         "resolve": asdict(target),
         "agent": target.agent,
         "model": used_model,
+        "review": asdict(target.review),
         "fix_branch": fix_branch,
         "base_branch": target.branch,
         "warnings": warnings,
@@ -1219,6 +1462,7 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
     pr_url = ""
     validate_info: dict = {}
     agent_log = ""
+    review_info: dict = {"enabled": False, "skipped": True}
     local_atts: list[dict] = []
     agent_proc: Optional[subprocess.CompletedProcess] = None
 
@@ -1276,8 +1520,38 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
         run_gate_cmd(wt_path, "lint", target.lint or "")
         run_gate_cmd(wt_path, "test", target.test or "")
 
+        # Review Gate: after lint/test, before push
+        review_info = run_review_gate(
+            cfg=target.review,
+            issue=issue,
+            wt=wt_path,
+            base_ref=base_ref,
+            local_attachments=local_atts,
+        )
+        if review_info.get("infra_fail"):
+            err = review_info.get("error") or "unknown review infra error"
+            if review_info.get("on_infra_fail") == "skip":
+                warnings.append(f"review_gate_infra_skipped: {err}")
+            else:
+                raise InfraFailure(f"Review Gate infra fail: {err}")
+        if review_info.get("verdict") == "FAIL":
+            reasons = review_info.get("reasons") or []
+            reason_txt = "; ".join(str(r) for r in reasons[:5]) if reasons else ""
+            detail = review_info.get("summary") or reason_txt or "no details"
+            raise BusinessFailure(
+                f"Review Gate FAIL: {detail}"
+                + (
+                    f" | reasons: {reason_txt}"
+                    if reason_txt and review_info.get("summary")
+                    else ""
+                )
+            )
+
         if args.no_push:
             success = True
+            rev_bit = ""
+            if review_info.get("enabled") and not review_info.get("skipped"):
+                rev_bit = f"\nReview: {review_info.get('verdict')} ({review_info.get('agent')})"
             return {
                 "ok": True,
                 "key": key,
@@ -1286,11 +1560,18 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
                 "pr_url": "",
                 "skipped": "push",
                 "validate": validate_info,
+                "review": review_info,
                 "resolve": asdict(target),
                 "attachments_local": local_atts,
                 "agent_log": agent_log,
-                "message_qq": f"✅ {key} 本地修复完成（未 push）\n分支 {fix_branch} ← {target.branch}",
-                "message_jira": f"✅ 自动修复完成（未 push）\n分支: {fix_branch}\nBase: {target.branch}",
+                "message_qq": (
+                    f"✅ {key} 本地修复完成（未 push）\n"
+                    f"分支 {fix_branch} ← {target.branch}{rev_bit}"
+                ),
+                "message_jira": (
+                    f"✅ 自动修复完成（未 push）\n"
+                    f"分支: {fix_branch}\nBase: {target.branch}{rev_bit}"
+                ),
             }
 
         push_branch(wt_path, fix_branch)
@@ -1331,6 +1612,15 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
                 pr_error = str(e)
 
         agent_meta = f"Agent: {used_agent}" + (f" · Model: {used_model}" if used_model else "")
+        if review_info.get("enabled") and not review_info.get("skipped"):
+            agent_meta += (
+                f"\nReview: {review_info.get('verdict')} "
+                f"({review_info.get('agent')}"
+                + (f"/{review_info.get('model')}" if review_info.get("model") else "")
+                + ")"
+            )
+            if review_info.get("summary"):
+                agent_meta += f" — {review_info['summary']}"
         if pr_error:
             jira_msg = (
                 f"⚠️ 代码已推送，但 PR 创建失败\n"
@@ -1351,6 +1641,8 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
                 f"{agent_meta}"
             )
             qq_msg = f"✅ {key} 已修复 → {pr_url or fix_branch}"
+            if review_info.get("enabled") and review_info.get("verdict") == "PASS":
+                qq_msg += "（Review PASS）"
 
         if not args.no_jira_comment:
             try:
@@ -1372,6 +1664,7 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
             "fix_branch": fix_branch,
             "base_branch": target.branch,
             "validate": validate_info,
+            "review": review_info,
             "resolve": asdict(target),
             "declined": declined,
             "attachments_local": local_atts,
@@ -1386,6 +1679,9 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
         qq_msg = f"❌ {key} 修复失败: {err}"
         if agent_log:
             qq_msg += f"\n(agent log: {agent_log})"
+        rlog = (review_info or {}).get("review_log") if review_info else None
+        if rlog:
+            qq_msg += f"\n(review log: {rlog})"
         if not args.dry_run and not args.no_jira_comment and args.comment_on_failure:
             try:
                 post_jira_comment(key, jira_msg)
@@ -1397,6 +1693,7 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
             "error": err,
             "agent": used_agent,
             "model": used_model,
+            "review": review_info,
             "resolve": asdict(target) if target else None,
             "attachments_local": local_atts,
             "agent_log": agent_log,
@@ -1481,6 +1778,17 @@ def main() -> int:
         default=None,
         help="model alias: opus|sonnet|fable (claude) or composer|grok (cursor)",
     )
+    rev_g = ap.add_mutually_exclusive_group()
+    rev_g.add_argument(
+        "--review",
+        action="store_true",
+        help="force enable Review Gate (overrides repos.json)",
+    )
+    rev_g.add_argument(
+        "--no-review",
+        action="store_true",
+        help="force disable Review Gate (overrides repos.json)",
+    )
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="agent timeout seconds")
     ap.add_argument("--dry-run", action="store_true", help="resolve only, print plan")
     ap.add_argument("--skip-agent", action="store_true", help="skip agent (validate will fail unless commits exist)")
@@ -1495,9 +1803,16 @@ def main() -> int:
     ap.add_argument("--keep-worktree", action="store_true")
     args = ap.parse_args()
     args.comment_on_failure = not args.no_comment_on_failure
+    args.review_override = True if args.review else (False if args.no_review else None)
 
     try:
-        keys, product, agent_from_targets, model_from_targets = parse_fix_targets(
+        (
+            keys,
+            product,
+            agent_from_targets,
+            model_from_targets,
+            review_from_targets,
+        ) = parse_fix_targets(
             args.targets,
             session_id=args.session,
             product_cli=args.product,
@@ -1509,6 +1824,8 @@ def main() -> int:
             args.agent = agent_from_targets
         if model_from_targets and not args.model:
             args.model = model_from_targets
+        if review_from_targets is not None and args.review_override is None:
+            args.review_override = review_from_targets
 
         # Model alias implies agent when unambiguous (e.g. grok → cursor)
         if args.model:
@@ -1537,6 +1854,10 @@ def main() -> int:
             started += f"（agent={args.agent}）"
         if args.model:
             started += f"（model={args.model}）"
+        if args.review_override is True:
+            started += "（review=on）"
+        elif args.review_override is False:
+            started += "（review=off）"
         started += "…"
 
         if args.resolve_only:
@@ -1562,6 +1883,7 @@ def main() -> int:
                 "product": args.product,
                 "agent": args.agent,
                 "model": args.model,
+                "review_override": args.review_override,
                 "declined": declined_by_key or None,
                 "message_qq": started,
             }

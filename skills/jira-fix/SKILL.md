@@ -29,6 +29,12 @@ triggers:
   - 等价 CLI：`--model opus|sonnet|fable|composer|grok`  
   - 默认也可写在 `repos.json`：`"models": { "claude": "sonnet", "cursor": "grok" }`  
   - 基建回退 claude→cursor 时：**忽略**本次 claude model，改用 `models.cursor`，未配置则 grok
+- **Review Gate（可选）**：Fix 合规 + lint/test 后、push 前交叉审查  
+  - `repos.json`：`"review": { "enabled": true, "agent": "claude", "model": "opus", "timeout_minutes": 10, "on_infra_fail": "reject" }`  
+  - 未配置或 `enabled: false` → 关；override 可覆盖 project  
+  - 单次覆盖：`--review` / `--no-review`，或 NL「需要审查」「跳过审查」  
+  - Review 上下文：Summary + Description（截断同 Fix）+ **image 附件** + diff；只审不改  
+  - PASS → push/PR；FAIL 或不通过的 infra（默认 reject）→ 不建 PR
 
 **不要**把 Hermes 分析出的根因/建议喂给 Fix Agent；脚本只读 Jira 原始字段。  
 例外：若评论中有本 bot 写入的最新 **PR Declined** 记录，会把拒绝原因注入 Fix Agent prompt（指导重修）。
@@ -45,20 +51,20 @@ triggers:
 
 ## 交互（必须遵守）
 
-若用户指定了 Agent / Model，**两步命令都必须带上**相同参数（或把 `cursor`/`claude`/`opus`/`grok`/`使用cursor` 等作为 targets token，脚本会识别）。
+若用户指定了 Agent / Model / Review 开关，**两步命令都必须带上**相同参数（或把 `cursor`/`claude`/`opus`/`grok`/`需要审查`/`跳过审查` 等作为 targets token，脚本会识别）。
 
 1. **先**用脚本解析目标（不跑修复），立刻回复用户「已开始」：
 
 ```
-python "{skillDir}/scripts/jira_fix.py" <targets...> [--agent cursor|claude] [--model opus|sonnet|fable|composer|grok] --resolve-only
+python "{skillDir}/scripts/jira_fix.py" <targets...> [--agent cursor|claude] [--model opus|sonnet|fable|composer|grok] [--review|--no-review] --resolve-only
 ```
 
-把 JSON 里的 `message_qq` 发给用户（例如 `🔧 已开始修复 CG-20926（agent=cursor）（model=grok）…`）。
+把 JSON 里的 `message_qq` 发给用户（例如 `🔧 已开始修复 CG-20926（agent=cursor）（model=grok）（review=on）…`）。
 
 2. **再**跑全流程（可多 KEY，脚本内严格串行）：
 
 ```
-python "{skillDir}/scripts/jira_fix.py" <targets...> [--agent cursor|claude] [--model opus|sonnet|fable|composer|grok]
+python "{skillDir}/scripts/jira_fix.py" <targets...> [--agent cursor|claude] [--model opus|sonnet|fable|composer|grok] [--review|--no-review]
 ```
 
 示例：
@@ -67,6 +73,8 @@ python "{skillDir}/scripts/jira_fix.py" <targets...> [--agent cursor|claude] [--
 python "{skillDir}/scripts/jira_fix.py" CG-20926
 python "{skillDir}/scripts/jira_fix.py" CG-20926 --agent cursor
 python "{skillDir}/scripts/jira_fix.py" CG-20926 --model grok
+python "{skillDir}/scripts/jira_fix.py" CG-20926 --no-review
+python "{skillDir}/scripts/jira_fix.py" CG-20926 需要审查
 python "{skillDir}/scripts/jira_fix.py" CG-20926 使用cursor
 python "{skillDir}/scripts/jira_fix.py" CG-20926 opus
 python "{skillDir}/scripts/jira_fix.py" CG-20926 使用sonnet
@@ -88,8 +96,8 @@ python "{skillDir}/scripts/jira_fix.py" CG-20926 --dry-run
 
 ## 脚本职责（单票循环）
 
-worktree `fix/<KEY>` → 下载 Jira 附件到 `.jira-fix-attachments/`（不入 commit）→ agent（**summary 为主**；description 可空；**禁止**再走 Jira MCP / 向用户索要票详情）→ 校验 commit（无 commit 时编排层可兜底）→ push → PR → Jira 评论。  
-失败时 JSON 含 `agent_log` 路径（日志含完整 prompt）。Review Gate 二期不做。
+worktree `fix/<KEY>` → 下载 Jira 附件到 `.jira-fix-attachments/`（不入 commit）→ Fix agent → 校验 commit（无 commit 时编排层可兜底）→ 可选 lint/test → **Review Gate**（若开启）→ PASS 后 push → PR → Jira 评论。  
+失败时 JSON 含 `agent_log` / `review.review_log`（含完整 prompt）。Review FAIL 或 infra reject 时**不 push、不建 PR**。
 
 **Bitbucket PR 韧性：** 建 PR 前先查是否已有 `OPEN` 同源分支 PR（幂等）；超时/断连/5xx 指数退避重试（默认 3 次）。若 **push 已成功** 但 PR 仍失败：`ok=false` + `partial=true` + `pushed=true`，Jira/QQ 发 ⚠️（含分支名与错误），**不要**当成整票修复失败而丢掉远端分支。
 
