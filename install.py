@@ -373,6 +373,24 @@ def step_3_5_cloudflare():
 
 # ── Step 3.6: Bitbucket + repos.json（/fix）────────────
 
+def _repos_missing_v12_fields(repos_path: Path) -> list[str]:
+    """Return human lines for project blocks missing models/review (v1.2)."""
+    try:
+        data = json.loads(repos_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return [f"(无法解析 repos.json: {e})"]
+    if not isinstance(data, dict):
+        return ["(repos.json 根节点不是对象)"]
+    lines: list[str] = []
+    for key, proj in data.items():
+        if str(key).startswith("_") or not isinstance(proj, dict):
+            continue
+        lack = [f for f in ("models", "review") if f not in proj]
+        if lack:
+            lines.append(f"{key}: 缺少 {', '.join(lack)}")
+    return lines
+
+
 def step_3_6_bitbucket():
     print("━━━ Step 3.6: Bitbucket + repos.json（/fix） ━━━")
 
@@ -413,6 +431,18 @@ def step_3_6_bitbucket():
     template = SCRIPT_DIR / "config" / "repos.template.json"
     if repos.is_file():
         _ok(f"repos.json 已存在: {repos}")
+        lack = _repos_missing_v12_fields(repos)
+        if lack:
+            _warn("repos.json 建议对照 template 合并 v1.2 字段（不会自动覆盖本机 path）:")
+            for line in lack:
+                print(f"     - {line}")
+            if template.is_file():
+                print(f"     参考: {template}")
+            print(
+                '     示例: "models": {"claude":"sonnet","cursor":"grok"}, '
+                '"review": {"enabled":true,"agent":"claude","model":"opus",'
+                '"timeout_minutes":10,"on_infra_fail":"reject"}'
+            )
     elif template.is_file():
         if QUIET:
             shutil.copy2(template, repos)
@@ -483,10 +513,12 @@ def done():
     print("  功能与用法:")
     print("    📊 日报     cron 每天推送待办 Bug（jira-bug-digest）")
     print("    🔍 分析     /jira-analyze CG-1 CG-2   → 编号列表 + Jira 评论")
-    print("    🔧 修复     回复 1 / /fix 1,2 / /fix CG-xxx → worktree + PR")
+    print("    🔧 修复     /fix CG-xxx / 1,2 → Fix Agent（可选 --model）→ PR")
+    print("    🔎 审查     repos.json review，或 --review / --no-review / 需要审查")
     print("    🧩 Overlay  /fix KEY overlay          → 强制产品线")
     print("")
     print("  /fix 依赖: Bitbucket 凭证 + config/repos.json + claude CLI")
+    print("  v1.2: models + review 写在 repos.json（见 repos.template.json）")
     print("  HTML 日报: Cloudflare Pages（可选）")
     print(f"  详情: {SCRIPT_DIR / 'README.md'}")
     print("")

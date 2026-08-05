@@ -510,6 +510,37 @@ REPOS_JSON="$SCRIPT_DIR/config/repos.json"
 REPOS_TPL="$SCRIPT_DIR/config/repos.template.json"
 if [ -f "$REPOS_JSON" ]; then
     echo "  ✅ repos.json 已存在: $REPOS_JSON"
+    # 检测缺 models / review（v1.2），不自动覆盖本机 path
+    if PY=$(_find_python); then
+        LACK_OUT=$("$PY" -c "
+import json, sys
+p = sys.argv[1]
+try:
+    data = json.load(open(p, encoding='utf-8'))
+except Exception as e:
+    print(f'(无法解析: {e})')
+    sys.exit(0)
+if not isinstance(data, dict):
+    print('(根节点不是对象)')
+    sys.exit(0)
+for k, proj in data.items():
+    if str(k).startswith('_') or not isinstance(proj, dict):
+        continue
+    lack = [f for f in ('models', 'review') if f not in proj]
+    if lack:
+        print(f\"{k}: 缺少 {', '.join(lack)}\")
+" "$REPOS_JSON" 2>/dev/null || true)
+        if [ -n "${LACK_OUT:-}" ]; then
+            echo "  ⚠️  repos.json 建议对照 template 合并 v1.2 字段（不会自动覆盖本机 path）:"
+            while IFS= read -r line; do
+                [ -n "$line" ] && echo "     - $line"
+            done <<EOF
+$LACK_OUT
+EOF
+            [ -f "$REPOS_TPL" ] && echo "     参考: $REPOS_TPL"
+            echo '     示例: "models": {"claude":"sonnet","cursor":"grok"}, "review": {"enabled":true,"agent":"claude","model":"opus",...}'
+        fi
+    fi
 elif [ -f "$REPOS_TPL" ]; then
     if [ "$QUIET" = true ]; then
         cp "$REPOS_TPL" "$REPOS_JSON"
@@ -596,10 +627,12 @@ echo ""
 echo "  功能与用法:"
 echo "    📊 日报     cron 每天推送待办 Bug（jira-bug-digest）"
 echo "    🔍 分析     /jira-analyze CG-1 CG-2   → 编号列表 + Jira 评论"
-echo "    🔧 修复     回复 1 / /fix 1,2 / /fix CG-xxx → worktree + PR"
+echo "    🔧 修复     /fix CG-xxx / 1,2 → Fix Agent（可选 --model）→ PR"
+echo "    🔎 审查     repos.json review，或 --review / --no-review / 需要审查"
 echo "    🧩 Overlay  /fix KEY overlay          → 强制产品线"
 echo ""
 echo "  /fix 依赖: Bitbucket 凭证 + config/repos.json + claude CLI"
+echo "  v1.2: models + review 写在 repos.json（见 repos.template.json）"
 echo "  HTML 日报: Cloudflare Pages（可选）"
 echo "  详情参考: $SCRIPT_DIR/README.md"
 echo ""
