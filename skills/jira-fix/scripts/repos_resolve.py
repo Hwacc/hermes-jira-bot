@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -40,6 +40,8 @@ class ResolveResult:
     lint: Optional[str] = None
     test: Optional[str] = None
     matched_via: str = ""
+    # Per-agent model prefs from repos.json, e.g. {"claude": "sonnet", "cursor": "grok"}
+    models: dict = field(default_factory=dict)
 
 
 def strip_leading_v(version: str) -> str:
@@ -181,6 +183,7 @@ def _resolve_branch_and_repo(
         "agent": project.get("agent", "claude"),
         "lint": project.get("lint"),
         "test": project.get("test"),
+        "models": dict(project.get("models") or {}),
     }
     default = scope.get("default") or project.get("default") or {}
     branch_pattern = (
@@ -191,7 +194,21 @@ def _resolve_branch_and_repo(
 
     base = _merge(project_defaults, default)
     if locked:
-        base = _merge(base, {k: locked[k] for k in ("repo", "path", "workspace", "provider", "agent", "lint", "test") if k in locked and locked[k] is not None})
+        base = _merge(
+            base,
+            {
+                k: locked[k]
+                for k in ("repo", "path", "workspace", "provider", "agent", "lint", "test")
+                if k in locked and locked[k] is not None
+            },
+        )
+        # Deep-merge models so override can override one agent without dropping others
+        if isinstance(locked.get("models"), dict):
+            merged_models = dict(base.get("models") or {})
+            merged_models.update(
+                {str(k): str(v) for k, v in locked["models"].items() if v}
+            )
+            base["models"] = merged_models
 
     versions = scope.get("versions") or {}
     version_lines = scope.get("version_lines") or {}
@@ -274,6 +291,13 @@ def resolve(
     if missing:
         raise ValueError(f"incomplete resolve for {project_key}: missing {missing} ({matched_via})")
 
+    models = fields.get("models") or {}
+    if not isinstance(models, dict):
+        models = {}
+    # Project-level models as base; override/locked models already merged into fields
+    if not models and isinstance(project.get("models"), dict):
+        models = dict(project["models"])
+
     return ResolveResult(
         project_key=project_key,
         product_id=product_id,
@@ -289,6 +313,7 @@ def resolve(
         lint=fields.get("lint"),
         test=fields.get("test"),
         matched_via=matched_via,
+        models={str(k): str(v) for k, v in models.items() if v},
     )
 
 

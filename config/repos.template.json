@@ -5,11 +5,16 @@
   "_version_match": "extract first x.y/.x.y.z from Jira name (e.g. V12.0 Public Release→12.0) → pad to x.y.z (12.0.0) → match versions keys (also padded) → version_lines longest prefix → branch_pattern",
   "_branch_pattern": "{version} = major.minor only, patch ignored (11.11.0/11.11.2→dev/11.11.x, 11.12→dev/11.12.x). Overlay same.",
   "_version_lines": "Prefix → inherit repo/path. After an override match, repo/path stay from override; only branch is derived unless override has its own version_lines.",
+  "_models": "Optional per-agent model. Aliases: claude=opus|sonnet|fable; cursor=composer|grok (cursor default=grok). Full CLI ids also ok. Infra fallback claude→cursor uses models.cursor, else grok.",
   "CG": {
     "name": "Cortex PC",
     "provider": "bitbucket",
     "workspace": "razersw",
     "agent": "claude",
+    "models": {
+      "claude": "sonnet",
+      "cursor": "grok"
+    },
     "overrides": [
       {
         "id": "overlay",

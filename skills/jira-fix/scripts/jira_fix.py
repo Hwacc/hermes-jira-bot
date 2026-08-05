@@ -58,6 +58,19 @@ MAX_ATTACHMENTS = 10
 MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024  # keep screenshots small for agent token cost
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
+# Natural-language / CLI model aliases (limited whitelist)
+CLAUDE_MODEL_ALIASES = {
+    "opus": "opus",
+    "sonnet": "sonnet",
+    "fable": "fable",
+}
+CURSOR_MODEL_ALIASES = {
+    "composer": "composer-2.5",
+    "grok": "cursor-grok-4.5-high",
+}
+CURSOR_DEFAULT_MODEL = CURSOR_MODEL_ALIASES["grok"]
+ALL_MODEL_ALIASES = frozenset(CLAUDE_MODEL_ALIASES) | frozenset(CURSOR_MODEL_ALIASES)
+
 
 class InfraFailure(Exception):
     """CLI missing / crash / timeout / empty failure — may fallback agent."""
@@ -614,12 +627,14 @@ def save_agent_log(
     proc: subprocess.CompletedProcess,
     agent: str,
     prompt: str = "",
+    model: Optional[str] = None,
 ) -> str:
     log_dir = Path(tempfile.gettempdir()) / "jira-fix-agent-logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     path = log_dir / f"{key}-{agent}-{int(time.time())}.log"
     parts = [
         f"agent={agent}",
+        f"model={model or '(default)'}",
         f"returncode={proc.returncode}",
         "",
         "--- prompt ---",
@@ -644,7 +659,67 @@ def which_agent(name: str) -> Optional[str]:
     return shutil.which(name)
 
 
-def run_claude(wt: Path, prompt: str, timeout: int) -> subprocess.CompletedProcess:
+def model_implies_agent(alias: str) -> Optional[str]:
+    a = (alias or "").strip().lower()
+    if a in CLAUDE_MODEL_ALIASES:
+        return "claude"
+    if a in CURSOR_MODEL_ALIASES:
+        return "cursor"
+    return None
+
+
+def expand_model_for_agent(agent: str, value: str) -> str:
+    """Map alias → CLI model id; unknown values pass through (for repos.json full ids)."""
+    v = (value or "").strip()
+    if not v:
+        raise ValueError("empty model")
+    key = v.lower()
+    if agent == "claude":
+        if key in CLAUDE_MODEL_ALIASES:
+            return CLAUDE_MODEL_ALIASES[key]
+        return v
+    if agent == "cursor":
+        if key in CURSOR_MODEL_ALIASES:
+            return CURSOR_MODEL_ALIASES[key]
+        return v
+    return v
+
+
+def resolve_model_id(
+    agent: str,
+    *,
+    cli_model: Optional[str] = None,
+    models_cfg: Optional[dict] = None,
+) -> Optional[str]:
+    """Pick model for agent: CLI/NL > repos.json models[agent] > agent default.
+
+    Claude default: None (omit --model). Cursor default: grok.
+    """
+    models_cfg = models_cfg or {}
+    if cli_model:
+        alias = cli_model.strip().lower()
+        implied = model_implies_agent(alias)
+        if implied and implied != agent:
+            raise ValueError(
+                f"model {cli_model!r} is for agent={implied}, not {agent}"
+            )
+        if alias in ALL_MODEL_ALIASES:
+            return expand_model_for_agent(agent, alias)
+        # Allow full id via --model when it isn't a known alias
+        return expand_model_for_agent(agent, cli_model)
+
+    cfg_val = models_cfg.get(agent)
+    if cfg_val:
+        return expand_model_for_agent(agent, str(cfg_val))
+
+    if agent == "cursor":
+        return CURSOR_DEFAULT_MODEL
+    return None
+
+
+def run_claude(
+    wt: Path, prompt: str, timeout: int, model: Optional[str] = None
+) -> subprocess.CompletedProcess:
     exe = which_agent("claude")
     if not exe:
         raise InfraFailure("claude CLI not found on PATH")
@@ -658,29 +733,42 @@ def run_claude(wt: Path, prompt: str, timeout: int) -> subprocess.CompletedProce
         "bypassPermissions",
         "--output-format",
         "json",
-        prompt,
     ]
+    if model:
+        cmd.extend(["--model", model])
+    cmd.append(prompt)
     try:
         return run(cmd, cwd=wt, timeout=timeout)
     except subprocess.TimeoutExpired as e:
         raise InfraFailure(f"claude timed out after {timeout}s") from e
 
 
-def run_cursor(wt: Path, prompt: str, timeout: int) -> subprocess.CompletedProcess:
+def run_cursor(
+    wt: Path, prompt: str, timeout: int, model: Optional[str] = None
+) -> subprocess.CompletedProcess:
     exe = which_agent("cursor")
     if not exe:
         raise InfraFailure("cursor agent CLI not found on PATH")
-    cmd = [exe, "-p", "-f", "--output-format", "json", prompt]
+    cmd = [exe, "-p", "-f", "--output-format", "json"]
+    if model:
+        cmd.extend(["--model", model])
+    cmd.append(prompt)
     try:
         return run(cmd, cwd=wt, timeout=timeout)
     except subprocess.TimeoutExpired as e:
         raise InfraFailure(f"cursor agent timed out after {timeout}s") from e
 
 
-def run_agent(agent: str, wt: Path, prompt: str, timeout: int) -> tuple[str, subprocess.CompletedProcess]:
+def run_agent(
+    agent: str,
+    wt: Path,
+    prompt: str,
+    timeout: int,
+    model: Optional[str] = None,
+) -> tuple[str, subprocess.CompletedProcess]:
     if agent == "cursor":
-        return "cursor", run_cursor(wt, prompt, timeout)
-    return "claude", run_claude(wt, prompt, timeout)
+        return "cursor", run_cursor(wt, prompt, timeout, model=model)
+    return "claude", run_claude(wt, prompt, timeout, model=model)
 
 
 def classify_agent_result(proc: subprocess.CompletedProcess) -> None:
@@ -965,14 +1053,23 @@ def normalize_agent_token(token: str) -> Optional[str]:
     return s if s in AGENT_NAMES else None
 
 
+def normalize_model_token(token: str) -> Optional[str]:
+    """Recognize model aliases: opus, 使用sonnet, model=grok, 用composer."""
+    s = (token or "").strip().lower()
+    if not s:
+        return None
+    s = re.sub(r"^(使用|用|--model[=:\s]*|model[=:\s]*)", "", s).strip()
+    return s if s in ALL_MODEL_ALIASES else None
+
+
 def parse_fix_targets(
     tokens: list[str],
     *,
     session_id: str = DEFAULT_SESSION,
     product_cli: Optional[str] = None,
     repos: Optional[str] = None,
-) -> tuple[list[str], Optional[str], Optional[str]]:
-    """Parse KEY / numbers / trailing product / agent → (keys, product, agent)."""
+) -> tuple[list[str], Optional[str], Optional[str], Optional[str]]:
+    """Parse KEY / numbers / trailing product / agent / model → (keys, product, agent, model)."""
     flat: list[str] = []
     for tok in tokens:
         for part in re.split(r"[\s,]+", tok.strip()):
@@ -982,16 +1079,21 @@ def parse_fix_targets(
         raise ValueError("no targets; pass issue KEY(s) or session number(s)")
 
     agent: Optional[str] = None
+    model: Optional[str] = None
     kept: list[str] = []
     for t in flat:
         a = normalize_agent_token(t)
         if a:
             agent = a
-        else:
-            kept.append(t)
+            continue
+        m = normalize_model_token(t)
+        if m:
+            model = m
+            continue
+        kept.append(t)
     flat = kept
     if not flat:
-        raise ValueError("no issue keys; only agent token was provided")
+        raise ValueError("no issue keys; only agent/model token was provided")
 
     product = product_cli
     products = known_product_ids(Path(repos) if repos else None)
@@ -1014,7 +1116,8 @@ def parse_fix_targets(
         else:
             raise ValueError(
                 f"unrecognized target {t!r}; expected KEY (CG-123), session number, "
-                f"product id, or agent (cursor/claude)"
+                f"product id, agent (cursor/claude), or model "
+                f"(opus/sonnet/fable/composer/grok)"
             )
 
     if numbers:
@@ -1029,7 +1132,7 @@ def parse_fix_targets(
             ordered.append(k)
     if not ordered:
         raise ValueError("no issue keys resolved")
-    return ordered, product, agent
+    return ordered, product, agent, model
 
 
 def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> dict:
@@ -1064,6 +1167,11 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
     if args.agent:
         target.agent = args.agent
 
+    cli_model = getattr(args, "model", None)
+    used_model = resolve_model_id(
+        target.agent, cli_model=cli_model, models_cfg=target.models
+    )
+
     fix_branch = f"{FIX_BRANCH_PREFIX}{key}"
     warnings: list[str] = []
     if not (issue.get("description") or "").strip():
@@ -1089,6 +1197,8 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
         "version": target.version,
         "version_extracted": target.version_extracted,
         "resolve": asdict(target),
+        "agent": target.agent,
+        "model": used_model,
         "fix_branch": fix_branch,
         "base_branch": target.branch,
         "warnings": warnings,
@@ -1119,14 +1229,27 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
 
         if not args.skip_agent:
             try:
-                used_agent, agent_proc = run_agent(target.agent, wt_path, prompt, args.timeout)
-                agent_log = save_agent_log(key, agent_proc, used_agent, prompt=prompt)
+                used_agent, agent_proc = run_agent(
+                    target.agent, wt_path, prompt, args.timeout, model=used_model
+                )
+                agent_log = save_agent_log(
+                    key, agent_proc, used_agent, prompt=prompt, model=used_model
+                )
                 classify_agent_result(agent_proc)
             except InfraFailure:
                 if target.agent != "claude":
                     raise
-                used_agent, agent_proc = run_agent("cursor", wt_path, prompt, args.timeout)
-                agent_log = save_agent_log(key, agent_proc, used_agent, prompt=prompt)
+                # Fallback: repos.json models.cursor > cursor default (grok)
+                used_agent = "cursor"
+                used_model = resolve_model_id(
+                    "cursor", cli_model=None, models_cfg=target.models
+                )
+                used_agent, agent_proc = run_agent(
+                    "cursor", wt_path, prompt, args.timeout, model=used_model
+                )
+                agent_log = save_agent_log(
+                    key, agent_proc, used_agent, prompt=prompt, model=used_model
+                )
                 classify_agent_result(agent_proc)
 
             reply = extract_agent_result_text(agent_proc)
@@ -1159,6 +1282,7 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
                 "ok": True,
                 "key": key,
                 "agent": used_agent,
+                "model": used_model,
                 "pr_url": "",
                 "skipped": "push",
                 "validate": validate_info,
@@ -1172,10 +1296,12 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
         push_branch(wt_path, fix_branch)
 
         title = f"Fix {key}: {issue['summary'][:80]}"
+        model_line = f"Model: {used_model}\n" if used_model else ""
         desc = (
             f"Automated fix for [{key}]({os.environ.get('JIRA_SITE_URL', '')}/browse/{key}).\n\n"
             f"**Summary:** {issue['summary']}\n\n"
             f"Agent: {used_agent}\n"
+            f"{model_line}"
             f"Base: `{target.branch}`\n"
         )
         pr_error = ""
@@ -1204,13 +1330,14 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
                 # Push already succeeded — do not treat as full fix failure
                 pr_error = str(e)
 
+        agent_meta = f"Agent: {used_agent}" + (f" · Model: {used_model}" if used_model else "")
         if pr_error:
             jira_msg = (
                 f"⚠️ 代码已推送，但 PR 创建失败\n"
                 f"分支: `{fix_branch}` → `{target.branch}`\n"
                 f"（远端已有 commit，可手动建 PR 或重跑 /fix）\n"
                 f"错误: {pr_error}\n"
-                f"Agent: {used_agent}"
+                f"{agent_meta}"
             )
             qq_msg = (
                 f"⚠️ {key} 已 push，PR 失败\n"
@@ -1221,7 +1348,7 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
             jira_msg = (
                 f"✅ 已自动修复 → PR: {pr_url or '(no PR)'}\n"
                 f"分支: {fix_branch} → {target.branch}\n"
-                f"Agent: {used_agent}"
+                f"{agent_meta}"
             )
             qq_msg = f"✅ {key} 已修复 → {pr_url or fix_branch}"
 
@@ -1239,6 +1366,7 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
             "pushed": True,
             "key": key,
             "agent": used_agent,
+            "model": used_model,
             "pr_url": pr_url,
             "pr_error": pr_error or None,
             "fix_branch": fix_branch,
@@ -1268,6 +1396,7 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
             "key": key,
             "error": err,
             "agent": used_agent,
+            "model": used_model,
             "resolve": asdict(target) if target else None,
             "attachments_local": local_atts,
             "agent_log": agent_log,
@@ -1347,6 +1476,11 @@ def main() -> int:
     ap.add_argument("--version", default=None, help="override fixVersion name")
     ap.add_argument("--repos", default=None, help="path to repos.json")
     ap.add_argument("--agent", default=None, choices=["claude", "cursor"], help="force agent")
+    ap.add_argument(
+        "--model",
+        default=None,
+        help="model alias: opus|sonnet|fable (claude) or composer|grok (cursor)",
+    )
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="agent timeout seconds")
     ap.add_argument("--dry-run", action="store_true", help="resolve only, print plan")
     ap.add_argument("--skip-agent", action="store_true", help="skip agent (validate will fail unless commits exist)")
@@ -1363,7 +1497,7 @@ def main() -> int:
     args.comment_on_failure = not args.no_comment_on_failure
 
     try:
-        keys, product, agent_from_targets = parse_fix_targets(
+        keys, product, agent_from_targets, model_from_targets = parse_fix_targets(
             args.targets,
             session_id=args.session,
             product_cli=args.product,
@@ -1373,12 +1507,36 @@ def main() -> int:
             args.product = product
         if agent_from_targets and not args.agent:
             args.agent = agent_from_targets
+        if model_from_targets and not args.model:
+            args.model = model_from_targets
+
+        # Model alias implies agent when unambiguous (e.g. grok → cursor)
+        if args.model:
+            alias = str(args.model).strip().lower()
+            implied = model_implies_agent(alias)
+            if implied:
+                if args.agent and args.agent != implied:
+                    raise ValueError(
+                        f"model {args.model!r} is for agent={implied}, "
+                        f"conflicts with agent={args.agent}"
+                    )
+                if not args.agent:
+                    args.agent = implied
+            elif alias not in ALL_MODEL_ALIASES:
+                # --model with full id: require explicit agent
+                if not args.agent:
+                    raise ValueError(
+                        f"model {args.model!r} is not a known alias; "
+                        f"pass --agent as well, or use opus|sonnet|fable|composer|grok"
+                    )
 
         started = f"🔧 已开始修复 {', '.join(keys)}" + (
             f"（product={args.product}）" if args.product else ""
         )
         if args.agent:
             started += f"（agent={args.agent}）"
+        if args.model:
+            started += f"（model={args.model}）"
         started += "…"
 
         if args.resolve_only:
@@ -1403,6 +1561,7 @@ def main() -> int:
                 "keys": keys,
                 "product": args.product,
                 "agent": args.agent,
+                "model": args.model,
                 "declined": declined_by_key or None,
                 "message_qq": started,
             }

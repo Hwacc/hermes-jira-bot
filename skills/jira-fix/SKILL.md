@@ -22,6 +22,13 @@ triggers:
   - 「修复 CG-xxx 使用 cursor」「/fix CG-xxx 用 cursor」「/fix 1 cursor」  
   - 「使用 claude」同理  
   - 等价 CLI：`--agent cursor` / `--agent claude`
+- **指定 Model（有限别名）**：可与 agent 一起用  
+  - Claude：`opus` / `sonnet` / `fable`（如「/fix CG-xxx opus」「使用 sonnet」）  
+  - Cursor：`composer` / `grok`（如「/fix CG-xxx grok」；**cursor 默认 grok**）  
+  - 模型别名会推断 agent（`grok`→cursor，`opus`→claude）；与显式 `--agent` 冲突则报错  
+  - 等价 CLI：`--model opus|sonnet|fable|composer|grok`  
+  - 默认也可写在 `repos.json`：`"models": { "claude": "sonnet", "cursor": "grok" }`  
+  - 基建回退 claude→cursor 时：**忽略**本次 claude model，改用 `models.cursor`，未配置则 grok
 
 **不要**把 Hermes 分析出的根因/建议喂给 Fix Agent；脚本只读 Jira 原始字段。  
 例外：若评论中有本 bot 写入的最新 **PR Declined** 记录，会把拒绝原因注入 Fix Agent prompt（指导重修）。
@@ -38,20 +45,20 @@ triggers:
 
 ## 交互（必须遵守）
 
-若用户指定了 Agent（cursor / claude），**两步命令都必须带上** `--agent <name>`（或把 `cursor`/`claude`/`使用cursor` 作为 targets 末尾 token，脚本会识别）。
+若用户指定了 Agent / Model，**两步命令都必须带上**相同参数（或把 `cursor`/`claude`/`opus`/`grok`/`使用cursor` 等作为 targets token，脚本会识别）。
 
 1. **先**用脚本解析目标（不跑修复），立刻回复用户「已开始」：
 
 ```
-python "{skillDir}/scripts/jira_fix.py" <targets...> [--agent cursor|claude] --resolve-only
+python "{skillDir}/scripts/jira_fix.py" <targets...> [--agent cursor|claude] [--model opus|sonnet|fable|composer|grok] --resolve-only
 ```
 
-把 JSON 里的 `message_qq` 发给用户（例如 `🔧 已开始修复 CG-20926（agent=cursor）…`）。
+把 JSON 里的 `message_qq` 发给用户（例如 `🔧 已开始修复 CG-20926（agent=cursor）（model=grok）…`）。
 
 2. **再**跑全流程（可多 KEY，脚本内严格串行）：
 
 ```
-python "{skillDir}/scripts/jira_fix.py" <targets...> [--agent cursor|claude]
+python "{skillDir}/scripts/jira_fix.py" <targets...> [--agent cursor|claude] [--model opus|sonnet|fable|composer|grok]
 ```
 
 示例：
@@ -59,7 +66,10 @@ python "{skillDir}/scripts/jira_fix.py" <targets...> [--agent cursor|claude]
 ```
 python "{skillDir}/scripts/jira_fix.py" CG-20926
 python "{skillDir}/scripts/jira_fix.py" CG-20926 --agent cursor
+python "{skillDir}/scripts/jira_fix.py" CG-20926 --model grok
 python "{skillDir}/scripts/jira_fix.py" CG-20926 使用cursor
+python "{skillDir}/scripts/jira_fix.py" CG-20926 opus
+python "{skillDir}/scripts/jira_fix.py" CG-20926 使用sonnet
 python "{skillDir}/scripts/jira_fix.py" 1 2
 python "{skillDir}/scripts/jira_fix.py" 1,2 overlay
 python "{skillDir}/scripts/jira_fix.py" CG-20926 --dry-run
