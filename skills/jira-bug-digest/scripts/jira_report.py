@@ -295,7 +295,7 @@ def deploy_to_pages(html):
         f.write(html)
     cmd = ["npx.cmd", "wrangler", "pages", "deploy", tmpdir,
            "--project-name=hermes-jira-bot", "--commit-dirty=true"]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
     m = re.search(r"https://([a-f0-9]+)\.hermes-jira-bot\.pages\.dev", r.stdout + r.stderr)
     if m: return f"https://{m.group(1)}.hermes-jira-bot.pages.dev"
     return f"https://master.hermes-jira-bot.pages.dev?t={int(time.time())}"

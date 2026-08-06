@@ -57,6 +57,18 @@ prompt: |
   - PAGES_URL|<url>|<count> → 格式化日报 + 链接
 ```
 
+**⚠️ 消息平台链接格式**：推送日报时 URL 必须用 markdown 链接语法 `[文字](url)`，裸 URL 在 QQ 等平台无法点击：
+
+```
+📊 Jira 待办日报
+🕐 日期
+━━━━━━━━━━━━━━
+📋 总数: count 个
+
+📸 可视化报表: [点击查看](<url>)
+🔗 Jira: [打开 Jira](https://razersw.atlassian.net)
+```
+
 ### 模式 B：纯文本摘要
 
 脚本：`{skillDir}/scripts/fetch_digest.py`

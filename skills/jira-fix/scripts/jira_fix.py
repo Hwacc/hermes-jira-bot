@@ -52,6 +52,23 @@ DECLINED_MARKERS = (
 DECLINED_REASON_RE = re.compile(r"(?m)^原因:\s*(.+)$")
 DECLINED_PR_URL_RE = re.compile(r"(?m)^PR:\s*(\S+)")
 
+# Structured Review FAIL block for next-/fix prompt injection (see format_review_fail_jira_comment)
+REVIEW_FAIL_OPEN = "[Hermes Review Fail]"
+REVIEW_FAIL_CLOSE = "[/Hermes Review Fail]"
+REVIEW_FAIL_BLOCK_RE = re.compile(
+    rf"{re.escape(REVIEW_FAIL_OPEN)}\s*(.*?)\s*{re.escape(REVIEW_FAIL_CLOSE)}",
+    re.S | re.I,
+)
+_REVIEW_FAIL_MACHINE_MAX = 2000
+_REVIEW_FAIL_FIELD_MAX = 400
+_REVIEW_FAIL_ITEM_MAX = 300
+_REVIEW_FAIL_ITEMS_MAX = 5
+# Later success comments invalidate older Review FAIL for next-/fix injection.
+FIX_SUCCESS_MARKERS = (
+    "✅ 已自动修复",
+    "✅ 自动修复完成",
+    "✅ PR 已合入",
+)
 DEFAULT_TIMEOUT = 30 * 60
 FIX_BRANCH_PREFIX = "fix/"
 ATTACHMENT_DIR = ".jira-fix-attachments"
@@ -226,6 +243,81 @@ def parse_latest_declined(comments: list[dict]) -> Optional[dict]:
 
 def fetch_latest_declined(key: str) -> Optional[dict]:
     return parse_latest_declined(fetch_comments(key))
+
+
+def _parse_bullet_section(block: str, header: str) -> list[str]:
+    """Parse '- item' lines under a Header: section until the next known header."""
+    m = re.search(
+        rf"(?im)^{re.escape(header)}:\s*\n((?:[ \t]*[-*].*(?:\n|$))*)",
+        block,
+    )
+    if not m:
+        return []
+    items: list[str] = []
+    for line in m.group(1).splitlines():
+        lm = re.match(r"[ \t]*[-*]\s*(.+)$", line.strip())
+        if not lm:
+            continue
+        val = lm.group(1).strip()
+        if not val or val.lower() == "(none)":
+            continue
+        items.append(val)
+    return items
+
+
+def parse_review_fail_block(text: str) -> Optional[dict]:
+    """Extract fields from a [Hermes Review Fail]…[/Hermes Review Fail] block."""
+    m = REVIEW_FAIL_BLOCK_RE.search(text or "")
+    if not m:
+        return None
+    block = m.group(1).strip()
+    summary = ""
+    sm = re.search(r"(?im)^Summary:\s*(.+)$", block)
+    if sm:
+        summary = sm.group(1).strip()
+    return {
+        "summary": summary,
+        "reasons": _parse_bullet_section(block, "Reasons"),
+        "suggestions": _parse_bullet_section(block, "Suggestions"),
+        "risks": _parse_bullet_section(block, "Risks"),
+    }
+
+
+def parse_latest_review_fail(comments: list[dict]) -> Optional[dict]:
+    """Return latest still-active Hermes Review FAIL block, or None.
+
+    Comments are oldest→newest. A later bot success comment (fix done / PR
+    merged) clears any prior Review FAIL so it is not re-injected into /fix.
+    """
+    latest: Optional[dict] = None
+    for c in comments:
+        text = _adf_text(c.get("body")).strip()
+        if not text:
+            continue
+        if any(m in text for m in FIX_SUCCESS_MARKERS):
+            latest = None
+            continue
+        if REVIEW_FAIL_OPEN not in text:
+            continue
+        parsed = parse_review_fail_block(text)
+        if not parsed:
+            continue
+        latest = {
+            **parsed,
+            "created": c.get("created") or "",
+            "comment_id": str(c.get("id") or ""),
+        }
+    return latest
+
+
+def fetch_fix_feedback(key: str) -> tuple[Optional[dict], Optional[dict]]:
+    """One comments fetch → (declined, review_fail). Either may be None."""
+    comments = fetch_comments(key)
+    return parse_latest_declined(comments), parse_latest_review_fail(comments)
+
+
+def fetch_latest_review_fail(key: str) -> Optional[dict]:
+    return parse_latest_review_fail(fetch_comments(key))
 
 
 def _safe_filename(name: str) -> str:
@@ -540,6 +632,7 @@ def build_prompt(
     issue: dict,
     local_attachments: Optional[list[dict]] = None,
     declined: Optional[dict] = None,
+    review_fail: Optional[dict] = None,
 ) -> str:
     """Build Fix Agent prompt. Summary is authoritative when description is empty."""
     key = issue["key"]
@@ -563,6 +656,23 @@ def build_prompt(
     else:
         lines += [
             "Description: (empty in Jira — rely on the Summary and any screenshot attachments below.)",
+            "",
+        ]
+
+    if review_fail:
+        lines += [
+            "Previous Review Gate FAIL (address these points in the new fix;",
+            "higher priority than PR decline feedback if both exist):",
+            f"- Summary: {review_fail.get('summary') or '(none)'}",
+        ]
+        for r in review_fail.get("reasons") or []:
+            lines.append(f"- Reason: {r}")
+        for s in review_fail.get("suggestions") or []:
+            lines.append(f"- Suggestion: {s}")
+        for risk in review_fail.get("risks") or []:
+            lines.append(f"- Risk: {risk}")
+        lines += [
+            "Produce a minimal fix that resolves the review findings above.",
             "",
         ]
 
@@ -681,6 +791,98 @@ def build_review_prompt(
     return "\n".join(lines)
 
 
+# Jira comments should stay short; full review stays in review_log / return dict.
+_REVIEW_JIRA_SUMMARY_MAX = 120
+_REVIEW_JIRA_REASON_MAX = 100
+_REVIEW_JIRA_REASONS_MAX = 3
+_JIRA_FAIL_COMMENT_MAX = 600
+
+
+def _truncate(text: str, max_len: int) -> str:
+    s = (text or "").strip()
+    if len(s) <= max_len:
+        return s
+    if max_len <= 1:
+        return "…"
+    return s[: max_len - 1] + "…"
+
+
+def _clip_one_line(text: str, max_len: int) -> str:
+    """Collapse whitespace/newlines then truncate for Jira one-liners."""
+    s = re.sub(r"\s+", " ", (text or "").strip())
+    return _truncate(s, max_len)
+
+
+def format_review_fail_brief(review_info: dict) -> str:
+    """Short Review FAIL message for Jira / BusinessFailure (not the full essay)."""
+    summary = _clip_one_line(
+        str(review_info.get("summary") or ""), _REVIEW_JIRA_SUMMARY_MAX
+    )
+    reasons: list[str] = []
+    for r in (review_info.get("reasons") or [])[:_REVIEW_JIRA_REASONS_MAX]:
+        clipped = _clip_one_line(str(r), _REVIEW_JIRA_REASON_MAX)
+        if not clipped:
+            continue
+        # Drop near-duplicates of summary (common in prose fallback).
+        if summary and (
+            clipped.startswith(summary[: min(60, len(summary))])
+            or summary.startswith(clipped[: min(60, len(clipped))])
+        ):
+            continue
+        reasons.append(clipped)
+
+    lines = ["Review Gate FAIL"]
+    if summary:
+        lines.append(summary)
+    for i, r in enumerate(reasons, 1):
+        lines.append(f"{i}. {r}")
+    if not summary and not reasons:
+        lines.append("no details")
+    if review_info.get("review_log"):
+        lines.append("(详情见 review log)")
+    return "\n".join(lines)
+
+
+def _machine_bullet_lines(items: list, limit: int = _REVIEW_FAIL_ITEMS_MAX) -> list[str]:
+    out: list[str] = []
+    for raw in (items or [])[:limit]:
+        clipped = _clip_one_line(str(raw), _REVIEW_FAIL_ITEM_MAX)
+        if clipped:
+            out.append(f"- {clipped}")
+    return out
+
+
+def format_review_fail_machine_block(review_info: dict) -> str:
+    """Medium-length machine block for next-/fix injection (~1.5–2KB)."""
+    lines = [
+        REVIEW_FAIL_OPEN,
+        f"Summary: {_clip_one_line(str(review_info.get('summary') or ''), _REVIEW_FAIL_FIELD_MAX) or '(none)'}",
+        "Reasons:",
+    ]
+    reasons = _machine_bullet_lines(review_info.get("reasons") or [])
+    lines.extend(reasons)
+    lines.append("Suggestions:")
+    lines.extend(_machine_bullet_lines(review_info.get("suggestions") or []))
+    lines.append("Risks:")
+    lines.extend(_machine_bullet_lines(review_info.get("risks") or []))
+    lines.append(REVIEW_FAIL_CLOSE)
+    block = "\n".join(lines)
+    if len(block) > _REVIEW_FAIL_MACHINE_MAX:
+        # Keep markers; truncate middle body.
+        body_budget = _REVIEW_FAIL_MACHINE_MAX - len(REVIEW_FAIL_OPEN) - len(REVIEW_FAIL_CLOSE) - 4
+        inner = block[len(REVIEW_FAIL_OPEN) + 1 : -(len(REVIEW_FAIL_CLOSE) + 1)]
+        inner = _truncate(inner, max(body_budget, 100))
+        block = f"{REVIEW_FAIL_OPEN}\n{inner}\n{REVIEW_FAIL_CLOSE}"
+    return block
+
+
+def format_review_fail_jira_comment(review_info: dict) -> str:
+    """Human brief + machine block for Review FAIL Jira comment (not hard-truncated)."""
+    brief = format_review_fail_brief(review_info)
+    machine = format_review_fail_machine_block(review_info)
+    return f"❌ 自动修复失败\n{brief}\n\n---\n{machine}"
+
+
 def parse_review_verdict(text: str) -> dict:
     """Extract Review JSON with verdict PASS|FAIL from agent output."""
     raw = (text or "").strip()
@@ -764,15 +966,145 @@ def parse_review_verdict(text: str) -> dict:
         if re.search(p, low):
             fail_hits += 1
     if fail_hits and not pass_hits:
-        return {"verdict": "FAIL", "summary": raw[:200], "reasons": [raw[:300]], "risks": [], "suggestions": []}
+        # Heuristic only — caller may enrich via structured extraction on _raw_prose.
+        # Keep one short reason so Jira machine block / next-/fix still has signal
+        # if extract fails (brief path dedupes near-duplicate of summary).
+        return {
+            "verdict": "FAIL",
+            "summary": _clip_one_line(raw, _REVIEW_JIRA_SUMMARY_MAX),
+            "reasons": [_clip_one_line(raw, _REVIEW_FAIL_ITEM_MAX)],
+            "risks": [],
+            "suggestions": [],
+            "_prose_fallback": True,
+            "_raw_prose": raw,
+        }
     if pass_hits and not fail_hits:
-        return {"verdict": "PASS", "summary": raw[:200], "reasons": [], "risks": [], "suggestions": []}
+        return {
+            "verdict": "PASS",
+            "summary": _clip_one_line(raw, _REVIEW_JIRA_SUMMARY_MAX),
+            "reasons": [],
+            "risks": [],
+            "suggestions": [],
+            "_prose_fallback": True,
+            "_raw_prose": raw,
+        }
 
     raise InfraFailure(
         f"Review Gate output missing valid verdict JSON"
         + (f" ({last_err})" if last_err else "")
-        + f": {raw[:500]}"
+        + f": {_truncate(raw, 200)}"
     )
+
+
+_REVIEW_EXTRACT_PROSE_MAX = 24000
+_REVIEW_EXTRACT_TIMEOUT_SEC = 5 * 60
+
+
+def build_review_extract_prompt(prose: str) -> str:
+    """Prompt: read review prose → emit structured verdict JSON only."""
+    body = _truncate((prose or "").strip(), _REVIEW_EXTRACT_PROSE_MAX)
+    return "\n".join(
+        [
+            "You are a JSON extractor. Read the review text below and convert it into ONE JSON object.",
+            "Do NOT re-review any code. Do NOT call tools. Do NOT write markdown fences or commentary.",
+            "Only extract conclusions already present in the review text.",
+            "",
+            "Required shape (output ONLY this object):",
+            '{"verdict":"PASS"|"FAIL","summary":"one-line","reasons":["..."],'
+            '"risks":[],"suggestions":[]}',
+            "- summary: one concise sentence (not a long essay)",
+            "- reasons: up to 5 short bullets explaining the verdict",
+            "- risks / suggestions: short bullets if present in the text, else []",
+            "",
+            "--- review text ---",
+            body,
+            "--- end ---",
+        ]
+    )
+
+
+def parse_review_verdict_strict(text: str) -> dict:
+    """Parse verdict JSON only — no prose heuristic fallback (for extract step)."""
+    raw = (text or "").strip()
+    if not raw:
+        raise InfraFailure("Review extract returned empty output")
+
+    candidates: list[str] = []
+    for m in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.S | re.I):
+        candidates.append(m.group(1))
+    if raw.startswith("{"):
+        candidates.append(raw)
+    for m in re.finditer(r"\{[^{}]*\"verdict\"[^{}]*\}", raw, re.S | re.I):
+        candidates.append(m.group(0))
+    if "{" in raw and "}" in raw:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if end > start:
+            candidates.append(raw[start : end + 1])
+
+    last_err: Optional[Exception] = None
+    for cand in candidates:
+        try:
+            obj = json.loads(cand)
+        except json.JSONDecodeError as e:
+            last_err = e
+            continue
+        if not isinstance(obj, dict):
+            continue
+        verdict = str(obj.get("verdict") or "").strip().upper()
+        if verdict in ("PASS", "FAIL"):
+            obj["verdict"] = verdict
+            obj.pop("_prose_fallback", None)
+            obj.pop("_raw_prose", None)
+            return obj
+
+    raise InfraFailure(
+        "Review extract did not return valid verdict JSON"
+        + (f" ({last_err})" if last_err else "")
+        + f": {_truncate(raw, 200)}"
+    )
+
+
+def extract_review_verdict_structured(
+    *,
+    prose: str,
+    agent: str,
+    model: Optional[str],
+    wt: Path,
+    key: str,
+    timeout: int = _REVIEW_EXTRACT_TIMEOUT_SEC,
+) -> tuple[dict, str]:
+    """Second-pass: agent reads review prose and emits structured verdict JSON.
+
+    Returns (verdict_obj, extract_log_path).
+    Does not use classify_agent_result (that path is for Fix runs; extract never commits).
+    """
+    prompt = build_review_extract_prompt(prose)
+    used_agent, proc = run_agent(agent, wt, prompt, timeout, model=model)
+    extract_log = save_agent_log(
+        key,
+        proc,
+        f"review-extract-{used_agent}",
+        prompt=prompt,
+        model=model,
+    )
+    out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+    if not out:
+        raise InfraFailure(
+            f"Review extract exited {proc.returncode} with no output"
+        )
+    text = extract_agent_result_text(proc)
+    try:
+        obj = parse_review_verdict_strict(out or text)
+    except InfraFailure:
+        obj = parse_review_verdict_strict(text)
+    return obj, extract_log
+
+
+def _strip_prose_meta(obj: dict) -> dict:
+    obj.pop("_prose_fallback", None)
+    obj.pop("_raw_prose", None)
+    return obj
 
 
 def run_review_gate(
@@ -794,6 +1126,9 @@ def run_review_gate(
     prompt = build_review_prompt(issue, wt, base_ref, local_attachments)
     key = issue["key"]
     review_log = ""
+    extract_log = ""
+    extracted = False
+    used_agent = cfg.agent
 
     try:
         used_agent, proc = run_agent(
@@ -810,10 +1145,59 @@ def run_review_gate(
         text = extract_agent_result_text(proc)
         # Prefer parsing full stdout for JSON (result field may be prose)
         raw_out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+        prose_source = (raw_out or text or "").strip()
+        verdict_obj: Optional[dict] = None
+        parse_err: Optional[BaseException] = None
         try:
             verdict_obj = parse_review_verdict(raw_out or text)
-        except InfraFailure:
-            verdict_obj = parse_review_verdict(text)
+        except InfraFailure as e1:
+            try:
+                verdict_obj = parse_review_verdict(text)
+            except InfraFailure as e2:
+                parse_err = e2
+
+        # Only extract when heuristic has a *clear* unidirectional PASS/FAIL.
+        # Ambiguous prose (both/neither) stays infra-fail — do not let extract guess.
+        need_extract = bool(verdict_obj and verdict_obj.get("_prose_fallback"))
+        if need_extract:
+            heuristic_verdict = str(verdict_obj.get("verdict") or "").upper()
+            prose_source = str(verdict_obj.get("_raw_prose") or prose_source)
+            extract_timeout = min(
+                _REVIEW_EXTRACT_TIMEOUT_SEC, max(60, timeout // 4)
+            )
+            try:
+                extracted_obj, extract_log = extract_review_verdict_structured(
+                    prose=prose_source,
+                    agent=used_agent,
+                    model=review_model,
+                    wt=wt,
+                    key=key,
+                    timeout=extract_timeout,
+                )
+                extracted_verdict = str(extracted_obj.get("verdict") or "").upper()
+                if extracted_verdict == heuristic_verdict:
+                    # Same gate decision — prefer richer structured fields.
+                    verdict_obj = extracted_obj
+                    extracted = True
+                # else: keep heuristic verdict; extract must not flip PASS↔FAIL
+            except (InfraFailure, BusinessFailure, RuntimeError, ValueError, OSError):
+                # Keep heuristic clipped fallback if extract fails.
+                pass
+
+        if not verdict_obj:
+            return {
+                "enabled": True,
+                "skipped": True,
+                "infra_fail": True,
+                "on_infra_fail": cfg.on_infra_fail,
+                "error": str(parse_err or "Review Gate missing verdict"),
+                "agent": cfg.agent,
+                "model": review_model,
+                "review_log": review_log,
+                "extract_log": extract_log or None,
+            }
+
+        _strip_prose_meta(verdict_obj)
     except (InfraFailure, BusinessFailure, RuntimeError, ValueError, OSError) as e:
         return {
             "enabled": True,
@@ -824,6 +1208,7 @@ def run_review_gate(
             "agent": cfg.agent,
             "model": review_model,
             "review_log": review_log,
+            "extract_log": extract_log or None,
         }
 
     return {
@@ -837,6 +1222,8 @@ def run_review_gate(
         "agent": used_agent,
         "model": review_model,
         "review_log": review_log,
+        "extract_log": extract_log or None,
+        "extracted": extracted,
     }
 
 
@@ -1436,14 +1823,15 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
 
     issue = fetch_issue(key)
     declined: Optional[dict] = None
+    review_fail: Optional[dict] = None
+    feedback_err = ""
     try:
-        declined = fetch_latest_declined(key)
+        declined, review_fail = fetch_fix_feedback(key)
     except Exception as e:
-        # Non-fatal: continue without declined context
+        # Non-fatal: continue without declined / review-fail context
         declined = None
-        declined_err = str(e)
-    else:
-        declined_err = ""
+        review_fail = None
+        feedback_err = str(e)
 
     version = args.version or issue.get("version")
     cfg = load_repos(find_repos_path(args.repos))
@@ -1476,10 +1864,15 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
     att_meta = issue.get("attachments") or []
     if att_meta:
         warnings.append(f"attachments_on_issue: {len(att_meta)}")
-    if declined_err:
-        warnings.append(f"declined_lookup_failed: {declined_err}")
-    elif declined:
-        warnings.append("previous_pr_declined: injecting reason into Fix Agent prompt")
+    if feedback_err:
+        warnings.append(f"fix_feedback_lookup_failed: {feedback_err}")
+    else:
+        if declined:
+            warnings.append("previous_pr_declined: injecting reason into Fix Agent prompt")
+        if review_fail:
+            warnings.append(
+                "previous_review_fail: injecting Review Gate FAIL into Fix Agent prompt"
+            )
     if target.review.enabled:
         warnings.append(
             f"review_gate: on agent={target.review.agent} "
@@ -1496,6 +1889,7 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
             for a in att_meta
         ],
         "declined": declined,
+        "review_fail": review_fail,
         "version_raw": version,
         "version": target.version,
         "version_extracted": target.version_extracted,
@@ -1530,7 +1924,9 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
     try:
         wt_path, base_ref = prepare_worktree(repo, key, target.branch, wt_root)
         local_atts = download_attachments(wt_path, att_meta)
-        prompt = build_prompt(issue, local_atts, declined=declined)
+        prompt = build_prompt(
+            issue, local_atts, declined=declined, review_fail=review_fail
+        )
 
         if not args.skip_agent:
             try:
@@ -1596,17 +1992,7 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
             else:
                 raise InfraFailure(f"Review Gate infra fail: {err}")
         if review_info.get("verdict") == "FAIL":
-            reasons = review_info.get("reasons") or []
-            reason_txt = "; ".join(str(r) for r in reasons[:5]) if reasons else ""
-            detail = review_info.get("summary") or reason_txt or "no details"
-            raise BusinessFailure(
-                f"Review Gate FAIL: {detail}"
-                + (
-                    f" | reasons: {reason_txt}"
-                    if reason_txt and review_info.get("summary")
-                    else ""
-                )
-            )
+            raise BusinessFailure(format_review_fail_brief(review_info))
 
         if args.no_push:
             success = True
@@ -1681,13 +2067,15 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
                 + ")"
             )
             if review_info.get("summary"):
-                agent_meta += f" — {review_info['summary']}"
+                agent_meta += (
+                    f" — {_clip_one_line(str(review_info['summary']), _REVIEW_JIRA_SUMMARY_MAX)}"
+                )
         if pr_error:
             jira_msg = (
                 f"⚠️ 代码已推送，但 PR 创建失败\n"
                 f"分支: `{fix_branch}` → `{target.branch}`\n"
                 f"（远端已有 commit，可手动建 PR 或重跑 /fix）\n"
-                f"错误: {pr_error}\n"
+                f"错误: {_truncate(pr_error, 200)}\n"
                 f"{agent_meta}"
             )
             qq_msg = (
@@ -1728,6 +2116,7 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
             "review": review_info,
             "resolve": asdict(target),
             "declined": declined,
+            "review_fail": review_fail,
             "attachments_local": local_atts,
             "agent_log": agent_log,
             "message_qq": qq_msg,
@@ -1736,13 +2125,25 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
 
     except (BusinessFailure, InfraFailure, RuntimeError, ValueError) as e:
         err = str(e)
-        jira_msg = f"❌ 自动修复失败\n{err}"
-        qq_msg = f"❌ {key} 修复失败: {err}"
+        # Review FAIL: structured comment (brief + machine block) for next-/fix inject.
+        # Other failures: keep Jira comment short.
+        if (
+            isinstance(e, BusinessFailure)
+            and review_info
+            and review_info.get("verdict") == "FAIL"
+        ):
+            jira_msg = format_review_fail_jira_comment(review_info)
+        else:
+            jira_msg = _truncate(f"❌ 自动修复失败\n{err}", _JIRA_FAIL_COMMENT_MAX)
+        qq_msg = f"❌ {key} 修复失败: {_truncate(err, 400)}"
         if agent_log:
             qq_msg += f"\n(agent log: {agent_log})"
         rlog = (review_info or {}).get("review_log") if review_info else None
         if rlog:
             qq_msg += f"\n(review log: {rlog})"
+        elog = (review_info or {}).get("extract_log") if review_info else None
+        if elog:
+            qq_msg += f"\n(review extract log: {elog})"
         if not args.dry_run and not args.no_jira_comment and args.comment_on_failure:
             try:
                 post_jira_comment(key, jira_msg)
@@ -1755,6 +2156,7 @@ def orchestrate(args: argparse.Namespace, issue_key: Optional[str] = None) -> di
             "agent": used_agent,
             "model": used_model,
             "review": review_info,
+            "review_fail_prior": review_fail,
             "resolve": asdict(target) if target else None,
             "attachments_local": local_atts,
             "agent_log": agent_log,
@@ -1924,13 +2326,22 @@ def main() -> int:
         if args.resolve_only:
             maybe_load_hermes_env()
             declined_by_key: dict[str, dict] = {}
+            review_fail_by_key: dict[str, dict] = {}
             for k in keys:
                 try:
-                    d = fetch_latest_declined(k)
+                    d, rf = fetch_fix_feedback(k)
                     if d:
                         declined_by_key[k] = d
+                    if rf:
+                        review_fail_by_key[k] = rf
                 except Exception:
                     pass
+            if review_fail_by_key:
+                bits = []
+                for k, rf in review_fail_by_key.items():
+                    s = rf.get("summary") or "(无摘要)"
+                    bits.append(f"{k} 上次 Review FAIL: {_clip_one_line(str(s), 80)}")
+                started += "\n⚠️ " + "; ".join(bits) + "（将注入 Fix prompt）"
             if declined_by_key:
                 bits = []
                 for k, d in declined_by_key.items():
@@ -1946,6 +2357,7 @@ def main() -> int:
                 "model": args.model,
                 "review_override": args.review_override,
                 "declined": declined_by_key or None,
+                "review_fail": review_fail_by_key or None,
                 "message_qq": started,
             }
             _print_json(result)

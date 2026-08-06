@@ -34,10 +34,13 @@ triggers:
   - 未配置或 `enabled: false` → 关；override 可覆盖 project  
   - 单次覆盖：`--review` / `--no-review`，或 NL「需要审查」「跳过审查」  
   - Review 上下文：Summary + Description（截断同 Fix）+ **image 附件** + diff；只审不改  
+  - 若 Review 输出是散文而非 JSON：在启发式判定出明确单向 PASS/FAIL 后再跑 **结构化抽取**（只读散文→JSON；不重审代码）；抽取结果不得翻转启发式 verdict；抽取失败则回退启发式短摘要 
   - PASS → push/PR；FAIL 或不通过的 infra（默认 reject）→ 不建 PR
 
 **不要**把 Hermes 分析出的根因/建议喂给 Fix Agent；脚本只读 Jira 原始字段。  
-例外：若评论中有本 bot 写入的最新 **PR Declined** 记录，会把拒绝原因注入 Fix Agent prompt（指导重修）。
+例外：
+- 评论中有本 bot 写入的最新 **PR Declined** 记录 → 拒绝原因注入 Fix Agent prompt（指导重修）。
+- 评论中有本 bot 写入的最新 **`[Hermes Review Fail]`** 块（Review Gate FAIL）→ summary/reasons/suggestions/risks 注入 Fix Agent prompt，作为下次修复的 reference。若其后已有成功修复 / PR 合入评论，则**不再注入**（视为已过期）。
 
 ## 前置条件
 
@@ -97,7 +100,7 @@ python "{skillDir}/scripts/jira_fix.py" CG-20926 --dry-run
 ## 脚本职责（单票循环）
 
 worktree `fix/<KEY>` → 下载 Jira 附件到 `.jira-fix-attachments/`（不入 commit）→ Fix agent → 校验 commit（无 commit 时编排层可兜底）→ 可选 lint/test → **Review Gate**（若开启）→ PASS 后 push → PR → Jira 评论。  
-失败时 JSON 含 `agent_log` / `review.review_log`（含完整 prompt）。Review FAIL 或 infra reject 时**不 push、不建 PR**。
+失败时 JSON 含 `agent_log` / `review.review_log`（含完整 prompt）。Review FAIL 或 infra reject 时**不 push、不建 PR**；FAIL 时 Jira 评论含短摘要 + `[Hermes Review Fail]` 机器块，供下次 `/fix` 回灌。
 
 **Bitbucket PR 韧性：** 建 PR 前先查是否已有 `OPEN` 同源分支 PR（幂等）；超时/断连/5xx 指数退避重试（默认 3 次）。若 **push 已成功** 但 PR 仍失败：`ok=false` + `partial=true` + `pushed=true`，Jira/QQ 发 ⚠️（含分支名与错误），**不要**当成整票修复失败而丢掉远端分支。
 
