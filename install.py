@@ -54,6 +54,7 @@ def _resolve_hermes_home() -> Path:
 HERMES_HOME = _resolve_hermes_home()
 HERMES_ENV = HERMES_HOME / ".env"
 SKILLS_DST = HERMES_HOME / "skills"
+HOOKS_DST = HERMES_HOME / "hooks"
 
 # ── helpers ────────────────────────────────────────────
 
@@ -263,6 +264,40 @@ def step_1_install_skills():
     if "jira-fix" not in installed:
         _warn("未找到 jira-fix skill（/fix 将不可用）")
     print(f"  → skills 目录: {SKILLS_DST}")
+    print("")
+
+
+# ── Step 1.5: install hooks ─────────────────────────────
+
+def step_1_5_install_hooks():
+    print("━━━ Step 1.5: 安装 Hooks ━━━")
+    src_dir = SCRIPT_DIR / "hooks"
+    if not src_dir.is_dir():
+        _skip("无 hooks 目录，跳过")
+        print("")
+        return
+    HOOKS_DST.mkdir(parents=True, exist_ok=True)
+    installed = []
+    for hook_dir in sorted(src_dir.iterdir()):
+        if not hook_dir.is_dir():
+            continue
+        hook_yaml = hook_dir / "HOOK.yaml"
+        handler_py = hook_dir / "handler.py"
+        if not hook_yaml.is_file() or not handler_py.is_file():
+            continue
+        name = hook_dir.name
+        dest = HOOKS_DST / name
+        if dest.exists():
+            shutil.rmtree(dest)
+            shutil.copytree(hook_dir, dest)
+            _ok(f"{name} — 已更新")
+        else:
+            shutil.copytree(hook_dir, dest)
+            _ok(f"{name} — 已安装")
+        installed.append(name)
+    if not installed:
+        _skip("无有效 hook 可安装")
+    print(f"  → hooks 目录: {HOOKS_DST}")
     print("")
 
 # ── Step 2: credentials ────────────────────────────────
@@ -529,6 +564,7 @@ if __name__ == "__main__":
     banner()
     step_0_check()
     step_1_install_skills()
+    step_1_5_install_hooks()
     step_2_credentials()
     step_3_cron()
     step_3_5_cloudflare()

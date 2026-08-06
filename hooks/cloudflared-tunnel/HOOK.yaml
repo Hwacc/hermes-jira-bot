@@ -1,0 +1,4 @@
+name: cloudflared-tunnel
+description: "Idempotent cloudflared tunnel start on gateway:startup (default tunnel hermes-jira-webhook)"
+events:
+  - gateway:startup

@@ -80,6 +80,17 @@ cloudflared tunnel route dns hermes-jira-webhook jira-hook.example.com
 cloudflared tunnel run hermes-jira-webhook
 ```
 
+**Gateway 自动拉起（可选）：** 安装脚本会把 `hooks/cloudflared-tunnel` 拷到 `$HERMES_HOME/hooks/`。Hermes `gateway:startup` 时幂等启动命名隧道（默认名 **`hermes-jira-webhook`**，与上文一致）。可用环境变量覆盖：
+
+| 变量 | 说明 |
+|------|------|
+| `CLOUDFLARED_TUNNEL` | 隧道名（默认 `hermes-jira-webhook`） |
+| `CLOUDFLARED_CONFIG` | `config.yml` 路径 |
+| `CLOUDFLARED_PID_FILE` | PID 文件（防重复拉起） |
+| `CLOUDFLARED_STARTUP_GRACE` | 启动后等待秒数再判定成功（默认 2） |
+
+日志默认写在 PID 文件同目录的 `cloudflared-tunnel.log`。Hermes 无 `gateway:shutdown` 事件，故用 PID 存活检测做幂等，不在 shutdown 杀进程。
+
 ### 4) Bitbucket 仓库 Webhook
 
 | 项 | 值 |

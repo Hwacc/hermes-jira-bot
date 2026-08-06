@@ -351,6 +351,40 @@ echo "  → skills 目录: $SKILL_DIR"
 echo ""
 
 # ============================================================
+# Step 1.5: Install Hooks
+# ============================================================
+echo "━━━ Step 1.5: 安装 Hooks ━━━"
+
+HOOK_SRC="$SCRIPT_DIR/hooks"
+if [ -d "$HOOK_SRC" ]; then
+    HOOK_DIR="$HERMES_HOME/hooks"
+    mkdir -p "$HOOK_DIR"
+    installed=0
+    for hook in "$HOOK_SRC/"*; do
+        if [ -f "$hook/HOOK.yaml" ] && [ -f "$hook/handler.py" ]; then
+            name=$(basename "$hook")
+            dest="$HOOK_DIR/$name"
+            if [ -d "$dest" ]; then
+                rm -rf "$dest"
+                cp -r "$hook" "$dest"
+                echo "  ✅ $name — 已更新"
+            else
+                cp -r "$hook" "$dest"
+                echo "  ✅ $name — 已安装"
+            fi
+            installed=$((installed + 1))
+        fi
+    done
+    if [ "$installed" -eq 0 ]; then
+        echo "  ⏭️  无有效 hook 可安装"
+    fi
+    echo "  → hooks 目录: $HOOK_DIR"
+else
+    echo "  ⏭️  无 hooks 目录，跳过"
+fi
+echo ""
+
+# ============================================================
 # Step 2: Configure Credentials
 # ============================================================
 echo "━━━ Step 2: 配置 Jira 凭证 ━━━"
